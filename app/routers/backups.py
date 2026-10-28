@@ -334,6 +334,50 @@ def _find_member_records(record: BackupRecord, db: Session) -> list[BackupRecord
     return result
 
 
+class BulkDeletePayload(BaseModel):
+    ids: list[int]
+
+
+@router.post("/bulk-delete")
+def delete_backups_bulk(payload: BulkDeletePayload, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    if not payload.ids:
+        return {"ok": True, "deleted": 0}
+
+    all_tasks: list[dict] = []
+    deleted = 0
+
+    for backup_id in payload.ids:
+        record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
+        if not record:
+            continue
+        members: list[BackupRecord] = []
+        if record.backup_type == "landscape":
+            members = _find_member_records(record, db)
+            for m in members:
+                all_tasks.append(_snapshot_remote_task(m, db, exclude_id=m.id))
+        all_tasks.append(_snapshot_remote_task(record, db, exclude_id=record.id))
+        for m in members:
+            try:
+                backup_engine.delete_backup(Path(m.path))
+                db.delete(m)
+            except Exception as exc:
+                _bg_logger.warning("Bulk-Löschung Mitglied %s: %s", m.name, exc)
+        backup_engine.delete_backup(Path(record.path))
+        db.delete(record)
+        deleted += 1
+
+    db.commit()
+
+    def _bg():
+        for task in all_tasks:
+            for e in _run_remote_cleanup(task):
+                _bg_logger.warning("Remote-Bereinigung Bulk '%s': %s", task["name"], e)
+
+    threading.Thread(target=_bg, daemon=True, name="remote-cleanup-bulk").start()
+    return {"ok": True, "deleted": deleted}
+
+
 @router.delete("/{backup_id}")
 def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()

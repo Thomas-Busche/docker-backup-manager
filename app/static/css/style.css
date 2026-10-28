@@ -170,6 +170,7 @@ tr:last-child td { border-bottom: none; }
 .accordion-body { border-top: 1px solid var(--border); }
 .accordion-landscape { border-color: var(--accent, #4a9eff); }
 .accordion-landscape .accordion-head { border-left: 3px solid var(--accent, #4a9eff); }
+.bulk-bar { align-items: center; gap: 10px; padding: 8px 18px; background: var(--bg-elev-2); border-bottom: 1px solid var(--border); font-size: .84rem; }
 
 .pill-select { display: flex; gap: 8px; flex-wrap: wrap; }
 .pill { padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border); cursor: pointer; font-size: .82rem; }

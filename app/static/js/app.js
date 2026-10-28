@@ -686,8 +686,15 @@ async function backupsPage() {
           </div>
         </div>
         <div class="accordion-body" style="display:none">
+          <div class="bulk-bar" style="display:none">
+            <span class="bulk-count"></span>
+            <button class="btn danger bulk-delete-btn" style="font-size:.8rem; padding:4px 10px;">Ausgewählte löschen</button>
+          </div>
           <table>
-            <thead><tr><th>Erstellt</th><th>Größe</th><th>Status</th><th></th></tr></thead>
+            <thead><tr>
+              <th style="width:36px; padding-right:0;"><input type="checkbox" class="select-all-cb" style="width:auto; margin:0; cursor:pointer;" title="Alle auswählen"></th>
+              <th>Erstellt</th><th>Größe</th><th>Status</th><th></th>
+            </tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -719,10 +726,47 @@ async function backupsPage() {
     }
 
     const tbody = acc.querySelector("tbody");
+    const selectAllCb = acc.querySelector(".select-all-cb");
+    const bulkBar = acc.querySelector(".bulk-bar");
+    const bulkCount = acc.querySelector(".bulk-count");
+    const bulkDeleteBtn = acc.querySelector(".bulk-delete-btn");
+
+    function updateBulkUI() {
+      const checked = tbody.querySelectorAll(".row-cb:checked").length;
+      const total = tbody.querySelectorAll(".row-cb").length;
+      bulkBar.style.display = checked > 0 ? "flex" : "none";
+      bulkCount.textContent = `${checked} von ${total} ausgewählt`;
+      selectAllCb.checked = checked === total && total > 0;
+      selectAllCb.indeterminate = checked > 0 && checked < total;
+    }
+
+    selectAllCb.addEventListener("change", () => {
+      tbody.querySelectorAll(".row-cb").forEach(cb => { cb.checked = selectAllCb.checked; });
+      updateBulkUI();
+    });
+
+    bulkDeleteBtn.addEventListener("click", async () => {
+      const ids = [...tbody.querySelectorAll(".row-cb:checked")].map(cb => parseInt(cb.dataset.id));
+      if (!ids.length) return;
+      if (!confirm(`${ids.length} Backup${ids.length === 1 ? "" : "s"} für "${name}" wirklich löschen?`)) return;
+      bulkDeleteBtn.disabled = true;
+      bulkDeleteBtn.textContent = "Löschen …";
+      try {
+        await api("/api/backups/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) });
+        toast(`${ids.length} Backup${ids.length === 1 ? "" : "s"} gelöscht`);
+        navigate("backups");
+      } catch (err) {
+        toast(err.message, "error");
+        bulkDeleteBtn.disabled = false;
+        bulkDeleteBtn.textContent = "Ausgewählte löschen";
+      }
+    });
+
     versions.forEach((v) => {
       const isLsc = v.backup_type === "landscape";
       const displaySize = isLsc && v.member_size_bytes ? v.member_size_bytes : (v.size_bytes || 0);
       const row = h(`<tr>
+        <td style="width:36px; padding-right:0; vertical-align:middle;"><input type="checkbox" class="row-cb" data-id="${v.id}" style="width:auto; margin:0; cursor:pointer;"></td>
         <td>${fmtDate(v.created_at)}</td>
         <td>${fmtBytes(displaySize)}</td>
         <td><span class="badge ${v.status === "ok" ? "ok" : "failed"}">${v.status}</span></td>
@@ -734,6 +778,7 @@ async function backupsPage() {
           <button class="btn danger delete-btn">Löschen</button>
         </td>
       </tr>`);
+      row.querySelector(".row-cb").addEventListener("change", updateBulkUI);
       const restoreBtn = row.querySelector(".restore-btn");
       if (restoreBtn) restoreBtn.addEventListener("click", () => openRestoreModal(v));
       const membersBtn = row.querySelector(".members-btn");
