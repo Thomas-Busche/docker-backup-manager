@@ -438,9 +438,11 @@ def backup_volume_from_stream(
                 sid = data.get("snapshot_id", "")
                 if sid:
                     logger.info("Restic-Snapshot %s erstellt (tag=%s)", sid[:8], tag)
-                    # data_added_packed = compressed bytes newly stored in the repo
-                    # (i.e. the actual incremental delta, not the full source size)
-                    return sid, data.get("data_added_packed", 0)
+                    # total_bytes_processed = full uncompressed source size read by restic.
+                    # This reflects the actual data volume being protected, not just the
+                    # incremental delta (data_added_packed), which shrinks to near-zero for
+                    # subsequent backups of mostly-unchanged data (e.g. a photo library).
+                    return sid, data.get("total_bytes_processed", data.get("data_added_packed", 0))
         except json.JSONDecodeError:
             pass
 
