@@ -411,18 +411,25 @@ Bucket, Endpoint (leer für AWS S3), Region, Access Key und Secret Key eintragen
 
 Ermöglicht Backup direkt in Google Drive ohne `rclone config` oder Konfigurationsdatei.
 
+> ⚠️ **Google erlaubt keine privaten IP-Adressen** (10.x, 192.168.x, 172.16.x) als Redirect-URI. Als `DBM_PUBLIC_URL` muss daher eine der folgenden Optionen verwendet werden:
+> - `http://localhost:8420` — nur wenn Browser und DBM auf **demselben** Rechner laufen
+> - Ein lokaler Hostname, z.B. `http://dbm.home:8420` — eingetragen in lokaler DNS oder `/etc/hosts`
+> - Ein echter Domain-Name mit Reverse Proxy
+>
+> **Einfachste Alternative:** Google Drive über den Speicherziel-Typ **rclone** einbinden — kein eigenes OAuth nötig, kein IP-Problem (siehe [rclone-Abschnitt](#rclone-dropbox-box-pcloud-mega-sftp-webdav-)).
+
 **Einmaliges Setup (pro Installation, nicht pro Benutzer):**
 
 1. [Google Cloud Console](https://console.cloud.google.com/) → Neues Projekt anlegen → **APIs & Services → Library → Google Drive API** aktivieren.
 2. **APIs & Services → OAuth consent screen**: Typ „External", App-Namen vergeben. Im Testing-Status den eigenen Google-Account unter „Test users" eintragen.
 3. **Credentials → Create Credentials → OAuth client ID** → Typ „Web application".
-4. In den DBM-Einstellungen ein neues Speicherziel „Google Drive" anlegen — der **Einrichtungs-Assistent** zeigt die genaue Redirect-URI an, die in Google einzutragen ist, und führt durch alle Schritte im Browser. Client-ID, Client-Secret und die DBM-Adresse lassen sich direkt in der Oberfläche eintragen — kein Neustart nötig.
+4. In den DBM-Einstellungen ein neues Speicherziel „Google Drive" anlegen — der **Einrichtungs-Assistent** zeigt die genaue Redirect-URI an und führt durch alle Schritte. Client-ID, Client-Secret und die DBM-Adresse lassen sich direkt in der Oberfläche eintragen — kein Neustart nötig.
 
-> **Alternativ** können die Zugangsdaten auch als Umgebungsvariablen gesetzt werden (Env-Vars haben Vorrang vor den UI-Einstellungen):
+> **Alternativ** als Umgebungsvariablen (haben Vorrang vor den UI-Einstellungen):
 > ```
 > DBM_GOOGLE_CLIENT_ID=<client-id>
 > DBM_GOOGLE_CLIENT_SECRET=<client-secret>
-> DBM_PUBLIC_URL=http://192.168.1.10:8420
+> DBM_PUBLIC_URL=http://dbm.home:8420
 > ```
 
 ### OneDrive

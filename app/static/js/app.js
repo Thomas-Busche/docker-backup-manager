@@ -2011,6 +2011,16 @@ async function openStorageTargetModal(existing) {
                 <li>Klicke <strong>Registrieren</strong></li>
               </ol>
               ` : `
+              <div class="wizard-warning" style="margin-bottom:10px;">
+                ⚠️ <strong>Google erlaubt keine privaten IP-Adressen</strong> (10.x, 192.168.x) als Redirect-URI.<br>
+                Als DBM-Adresse muss daher <strong>eine dieser Optionen</strong> funktionieren:<br>
+                <ul style="margin:6px 0 0; padding-left:18px;">
+                  <li><code>http://localhost:8420</code> – nur wenn Browser und DBM auf <em>demselben</em> Rechner laufen</li>
+                  <li>Ein lokaler Hostname, z.B. <code>http://dbm.home:8420</code> – eingetragen in lokaler DNS oder <code>/etc/hosts</code></li>
+                  <li>Ein echter Domain-Name mit Reverse Proxy</li>
+                </ul>
+                <strong>Einfachste Alternative:</strong> Google Drive über <strong>rclone</strong> einbinden – kein eigenes OAuth nötig, kein IP-Problem (Speicherziel-Typ „rclone").
+              </div>
               <p>Du brauchst einen <strong>Google OAuth-Client</strong> in der Google Cloud Console.</p>
               <ol>
                 <li>Öffne die <a href="${registerUrl}" target="_blank" rel="noopener">Google Cloud Console → OAuth-Client-ID erstellen</a></li>
