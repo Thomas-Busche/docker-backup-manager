@@ -415,37 +415,35 @@ Ermöglicht Backup direkt in Google Drive ohne `rclone config` oder Konfiguratio
 
 1. [Google Cloud Console](https://console.cloud.google.com/) → Neues Projekt anlegen → **APIs & Services → Library → Google Drive API** aktivieren.
 2. **APIs & Services → OAuth consent screen**: Typ „External", App-Namen vergeben. Im Testing-Status den eigenen Google-Account unter „Test users" eintragen.
-3. **Credentials → Create Credentials → OAuth client ID** → Typ „Web application".  
-   Unter „Authorized redirect URIs" eintragen:  
-   `<DBM_PUBLIC_URL>/api/settings/oauth/google/callback`  
-   (z. B. `http://192.168.1.10:8420/api/settings/oauth/google/callback`)
-4. Client-ID und Client-Secret als Umgebungsvariablen setzen und Container neu starten:
-   ```
-   DBM_GOOGLE_CLIENT_ID=<client-id>
-   DBM_GOOGLE_CLIENT_SECRET=<client-secret>
-   DBM_PUBLIC_URL=http://192.168.1.10:8420
-   ```
+3. **Credentials → Create Credentials → OAuth client ID** → Typ „Web application".
+4. In den DBM-Einstellungen ein neues Speicherziel „Google Drive" anlegen — der **Einrichtungs-Assistent** zeigt die genaue Redirect-URI an, die in Google einzutragen ist, und führt durch alle Schritte im Browser. Client-ID, Client-Secret und die DBM-Adresse lassen sich direkt in der Oberfläche eintragen — kein Neustart nötig.
 
-Danach: In den Einstellungen auf **„Mit Google anmelden"** klicken und im Popup einloggen.
+> **Alternativ** können die Zugangsdaten auch als Umgebungsvariablen gesetzt werden (Env-Vars haben Vorrang vor den UI-Einstellungen):
+> ```
+> DBM_GOOGLE_CLIENT_ID=<client-id>
+> DBM_GOOGLE_CLIENT_SECRET=<client-secret>
+> DBM_PUBLIC_URL=http://192.168.1.10:8420
+> ```
 
 ### OneDrive
+
+Funktioniert mit privaten Microsoft-/Outlook-Konten und Firmenkonten. Kein Firmenkonto, keine Azure-Lizenz nötig — die App-Registrierung ist kostenlos.
 
 **Einmaliges Setup:**
 
 1. [Azure Portal](https://portal.azure.com/) → **App registrations → New registration**.  
-   Als Redirect-URI (Typ „Web"):  
-   `<DBM_PUBLIC_URL>/api/settings/oauth/onedrive/callback`
+   Bei „Supported account types": **Konten in einem beliebigen Organisationsverzeichnis und persönliche Microsoft-Konten** wählen.
 2. **Certificates & secrets → New client secret** erzeugen.
 3. **API permissions → Microsoft Graph → Delegated permissions**: `Files.ReadWrite` und `offline_access` hinzufügen.
-4. Umgebungsvariablen setzen:
-   ```
-   DBM_MS_CLIENT_ID=<application-id>
-   DBM_MS_CLIENT_SECRET=<client-secret>
-   DBM_PUBLIC_URL=http://192.168.1.10:8420
-   ```
-   Für private Microsoft-Konten (nicht nur Firmenkonten): `DBM_MS_TENANT=common` lassen (Standard).
+4. In den DBM-Einstellungen ein neues Speicherziel „OneDrive" anlegen — der **Einrichtungs-Assistent** zeigt die genaue Redirect-URI an, die in Azure unter „Authentifizierung" einzutragen ist, und führt durch alle Schritte. Client-ID, Client-Secret und die DBM-Adresse lassen sich direkt in der Oberfläche eintragen — kein Neustart nötig.
 
-Danach: In den Einstellungen auf **„Mit Microsoft anmelden"** klicken.
+> **Alternativ** als Umgebungsvariablen (haben Vorrang vor den UI-Einstellungen):
+> ```
+> DBM_MS_CLIENT_ID=<application-id>
+> DBM_MS_CLIENT_SECRET=<client-secret>
+> DBM_PUBLIC_URL=http://192.168.1.10:8420
+> ```
+> Für private Microsoft-Konten: `DBM_MS_TENANT=common` lassen (Standard).
 
 ### rclone (Dropbox, Box, pCloud, Mega, SFTP, WebDAV, …)
 
@@ -592,11 +590,11 @@ Diese Übersicht bleibt dauerhaft in der Datenbank erhalten — anders als die F
 | `DBM_DEFAULT_RETENTION_COUNT` | `7` | Standard-Anzahl gehaltener Versionen für neue Zeitpläne |
 | `DBM_DEFAULT_RETENTION_DAYS` | `0` | Standard-Altersgrenze in Tagen für neue Zeitpläne (0 = deaktiviert) |
 | `DBM_HELPER_IMAGE` | `alpine:3.20` | Docker-Image für den Backup-Hilfscontainer |
-| `DBM_PUBLIC_URL` | — | Externe URL der App (z. B. `http://192.168.1.10:8420`), benötigt für OAuth-Rücksprungadressen |
-| `DBM_GOOGLE_CLIENT_ID` | — | Google OAuth Client-ID (für Google Drive) |
-| `DBM_GOOGLE_CLIENT_SECRET` | — | Google OAuth Client-Secret (für Google Drive) |
-| `DBM_MS_CLIENT_ID` | — | Microsoft Azure App-ID (für OneDrive) |
-| `DBM_MS_CLIENT_SECRET` | — | Microsoft Client-Secret (für OneDrive) |
+| `DBM_PUBLIC_URL` | — | Externe URL der App (z. B. `http://192.168.1.10:8420`), benötigt für OAuth-Rücksprungadressen. Kann alternativ im Einrichtungs-Assistenten gesetzt werden. |
+| `DBM_GOOGLE_CLIENT_ID` | — | Google OAuth Client-ID (für Google Drive). Kann alternativ im Einrichtungs-Assistenten gesetzt werden. |
+| `DBM_GOOGLE_CLIENT_SECRET` | — | Google OAuth Client-Secret (für Google Drive). Kann alternativ im Einrichtungs-Assistenten gesetzt werden. |
+| `DBM_MS_CLIENT_ID` | — | Microsoft Azure App-ID (für OneDrive). Kann alternativ im Einrichtungs-Assistenten gesetzt werden. |
+| `DBM_MS_CLIENT_SECRET` | — | Microsoft Client-Secret (für OneDrive). Kann alternativ im Einrichtungs-Assistenten gesetzt werden. |
 | `DBM_MS_TENANT` | `common` | Azure-Tenant (Standard `common` = private + Firmenkonten) |
 
 ---
