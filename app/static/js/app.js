@@ -1997,7 +1997,12 @@ async function openStorageTargetModal(existing) {
 
             <div class="wizard-panel" data-panel="1">
               ${isOneDrive ? `
-              <p>Du brauchst eine kostenlose <strong>Azure App Registration</strong> – das geht auch mit einem normalen Microsoft-/Outlook-Konto, kein Firmenkonto nötig.</p>
+              <p>Du brauchst eine <strong>Azure App Registration</strong>. Microsoft erfordert dafür ein Azure-Verzeichnis (kostenlos).</p>
+              <div class="wizard-warning" style="margin-bottom:10px;">
+                ℹ️ <strong>Fehlermeldung „außerhalb eines Verzeichnisses"?</strong><br>
+                Dein Microsoft-Konto hat noch kein Azure-Verzeichnis. Einmalig <a href="https://azure.microsoft.com/free/" target="_blank" rel="noopener">kostenlos bei Azure registrieren</a> (nur zur Identitätsprüfung, keine Kosten). Danach läuft die App-Registrierung normal.<br>
+                <strong>Alternative ohne Azure:</strong> OneDrive lässt sich auch über <strong>rclone</strong> einbinden – kein Azure-Konto nötig, dafür einmalige Einrichtung per Kommandozeile (siehe Speicherziel-Typ „rclone").
+              </div>
               <ol>
                 <li>Öffne das <a href="${registerUrl}" target="_blank" rel="noopener">Azure-Portal → App registrieren</a></li>
                 <li>Gib einen beliebigen Namen ein, z.B. <code>Docker Backup Manager</code></li>

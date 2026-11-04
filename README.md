@@ -427,7 +427,10 @@ Ermöglicht Backup direkt in Google Drive ohne `rclone config` oder Konfiguratio
 
 ### OneDrive
 
-Funktioniert mit privaten Microsoft-/Outlook-Konten und Firmenkonten. Kein Firmenkonto, keine Azure-Lizenz nötig — die App-Registrierung ist kostenlos.
+Funktioniert mit privaten Microsoft-/Outlook-Konten und Firmenkonten.
+
+> **Fehlermeldung „außerhalb eines Verzeichnisses"?** Microsoft erfordert für App-Registrierungen ein Azure-Verzeichnis. Einmalig [kostenlos bei Azure registrieren](https://azure.microsoft.com/free/) (nur Identitätsprüfung, keine Kosten). Danach läuft die App-Registrierung normal.  
+> **Alternative:** OneDrive über den Speicherziel-Typ **rclone** einbinden – kein Azure-Konto nötig, aber einmalige Einrichtung per `rclone config` erforderlich (siehe [rclone-Abschnitt](#rclone-dropbox-box-pcloud-mega-sftp-webdav-)).
 
 **Einmaliges Setup:**
 
