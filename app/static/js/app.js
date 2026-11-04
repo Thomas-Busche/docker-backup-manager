@@ -2018,16 +2018,21 @@ async function openStorageTargetModal(existing) {
             </div>
 
             <div class="wizard-panel hidden" data-panel="2">
+              ${!appCfg || !appCfg.public_url_set ? `
+              <div class="wizard-warning" style="margin-bottom:12px;">
+                <strong>Zuerst: Deine DBM-Adresse eintragen</strong><br>
+                Damit die Redirect-URI korrekt ist, muss DBM wissen, unter welcher Adresse es im Browser erreichbar ist.
+                <div style="display:flex; gap:8px; margin-top:8px; align-items:center; flex-wrap:wrap;">
+                  <input type="text" id="wizard-public-url" placeholder="http://192.168.1.10:8420" style="flex:1; min-width:200px;" />
+                  <button type="button" class="btn" id="wizard-save-url-btn">Speichern</button>
+                </div>
+                <div id="wizard-url-result" style="margin-top:4px; font-size:.82rem;"></div>
+              </div>` : ""}
               <p>Trage diese <strong>Redirect-URI</strong> in deine App ein${isOneDrive ? " (Azure → Authentifizierung → Plattform hinzufügen → Web)" : " (Google Cloud Console → Autorisierte Redirect-URIs)"}:</p>
               <div class="wizard-uri-box">
                 <code id="wizard-redirect-uri">${redirectPlaceholder}</code>
-                ${appCfg && appCfg.redirect_uri ? `<button type="button" class="btn wizard-copy-btn" title="Kopieren">📋</button>` : ""}
+                <button type="button" class="btn wizard-copy-btn" title="Kopieren" ${!appCfg || !appCfg.redirect_uri ? "disabled" : ""}>📋</button>
               </div>
-              ${!appCfg || !appCfg.public_url_set ? `
-              <div class="wizard-warning">
-                ⚠️ <strong>DBM_PUBLIC_URL</strong> ist nicht gesetzt. Setze sie in deiner <code>docker-compose.yml</code>, damit die Redirect-URI korrekt ist:<br>
-                <code>DBM_PUBLIC_URL: "http://deine-ip:8420"</code>
-              </div>` : ""}
               ${isOneDrive ? `<p style="font-size:.85rem; color:var(--muted);">Danach: Azure → Zertifikate &amp; Geheimnisse → Neuer geheimer Clientschlüssel → Wert kopieren (nur einmal sichtbar!)</p>` : ""}
               <div style="display:flex; gap:8px;">
                 <button type="button" class="btn wizard-back" data-back="1">← Zurück</button>
@@ -2074,6 +2079,25 @@ async function openStorageTargetModal(existing) {
           navigator.clipboard.writeText(fieldsEl.querySelector("#wizard-redirect-uri").textContent).catch(() => {});
           copyBtn.textContent = "✓";
           setTimeout(() => { copyBtn.textContent = "📋"; }, 1500);
+        });
+
+        const saveUrlBtn = fieldsEl.querySelector("#wizard-save-url-btn");
+        if (saveUrlBtn) saveUrlBtn.addEventListener("click", async () => {
+          const urlInput = fieldsEl.querySelector("#wizard-public-url");
+          const urlResult = fieldsEl.querySelector("#wizard-url-result");
+          const url = urlInput.value.trim().replace(/\/$/, "");
+          if (!url) { urlResult.innerHTML = '<span style="color:var(--danger)">Bitte eine Adresse eingeben.</span>'; return; }
+          saveUrlBtn.disabled = true;
+          try {
+            await api("/api/settings/public-url", { method: "PUT", body: JSON.stringify({ url }) });
+            const redirectUri = `${url}/api/settings/oauth/${provider}/callback`;
+            fieldsEl.querySelector("#wizard-redirect-uri").textContent = redirectUri;
+            if (copyBtn) { copyBtn.disabled = false; }
+            urlResult.innerHTML = '<span style="color:#2d7a46">✓ Gespeichert</span>';
+            urlInput.closest(".wizard-warning").style.border = "1px solid #2d7a46";
+          } catch (e) {
+            urlResult.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message)}</span>`;
+          } finally { saveUrlBtn.disabled = false; }
         });
 
         fieldsEl.querySelector("#wizard-save-btn").addEventListener("click", async () => {

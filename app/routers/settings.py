@@ -480,9 +480,11 @@ def _upsert_setting(db: Session, key: str, value: str) -> None:
 
 
 @router.get("/oauth-apps")
-def get_oauth_apps(user: User = Depends(get_admin_user)):
+def get_oauth_apps(db: Session = Depends(get_db), user: User = Depends(get_admin_user)):
     """Return configuration state for each OAuth provider (IDs only, no secrets)."""
     from app import config as cfg
+    effective_url = oauth_storage._get_public_url()
+    url_from_env = bool(cfg.PUBLIC_URL)
     result = {}
     for provider in ("onedrive", "google"):
         client_id, client_secret = oauth_storage._get_credentials(provider)
@@ -491,18 +493,32 @@ def get_oauth_apps(user: User = Depends(get_admin_user)):
             if provider == "onedrive"
             else bool(cfg.GOOGLE_CLIENT_ID and cfg.GOOGLE_CLIENT_SECRET)
         )
-        redirect = ""
-        if cfg.PUBLIC_URL:
-            redirect = f"{cfg.PUBLIC_URL}/api/settings/oauth/{provider}/callback"
+        redirect = f"{effective_url}/api/settings/oauth/{provider}/callback" if effective_url else ""
         result[provider] = {
             "configured": bool(client_id and client_secret),
             "client_id": client_id,
             "from_env": from_env,
             "redirect_uri": redirect,
-            "public_url_set": bool(cfg.PUBLIC_URL),
-            "public_url": cfg.PUBLIC_URL,
+            "public_url_set": bool(effective_url),
+            "public_url": effective_url,
+            "public_url_from_env": url_from_env,
         }
     return result
+
+
+class PublicUrlPayload(BaseModel):
+    url: str
+
+
+@router.put("/public-url")
+def save_public_url(payload: PublicUrlPayload, db: Session = Depends(get_db),
+                    user: User = Depends(get_admin_user)):
+    url = payload.url.strip().rstrip("/")
+    if url and not url.startswith(("http://", "https://")):
+        raise HTTPException(400, "URL muss mit http:// oder https:// beginnen.")
+    _upsert_setting(db, "public_url", url)
+    db.commit()
+    return {"ok": True, "url": url}
 
 
 @router.put("/oauth-apps/{provider}")

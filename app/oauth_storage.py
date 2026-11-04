@@ -75,13 +75,26 @@ class OAuthNotConfigured(Exception):
     pass
 
 
+def _get_public_url() -> str:
+    """Return PUBLIC_URL from env var or DB fallback."""
+    if PUBLIC_URL:
+        return PUBLIC_URL
+    from app.database import SessionLocal
+    from app.models import AppSetting
+    with SessionLocal() as db:
+        row = db.query(AppSetting).filter_by(key="public_url").first()
+        return row.value.rstrip("/") if row and row.value else ""
+
+
 def _require_public_url() -> str:
-    if not PUBLIC_URL:
+    url = _get_public_url()
+    if not url:
         raise OAuthNotConfigured(
             "DBM_PUBLIC_URL ist nicht gesetzt - wird als OAuth-Redirect-Adresse benötigt "
-            "(z.B. http://192.168.1.10:8420). Siehe README."
+            "(z.B. http://192.168.1.10:8420). Im Einrichtungs-Assistenten oben eintragen oder "
+            "in der docker-compose.yml setzen."
         )
-    return PUBLIC_URL
+    return url
 
 
 def redirect_uri(provider: str) -> str:
