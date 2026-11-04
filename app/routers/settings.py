@@ -378,14 +378,16 @@ def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), us
 
 # ---------- Google Drive / OneDrive OAuth ----------
 
-@router.get("/oauth/{provider}/start")
+@router.get("/oauth/{provider}/start", response_class=HTMLResponse)
 def oauth_start(provider: str, user: User = Depends(get_admin_user)):
     if provider not in ("google", "onedrive"):
         raise HTTPException(404, "Unknown provider")
     try:
         url, state = oauth_storage.build_auth_url(provider)
     except oauth_storage.OAuthNotConfigured as exc:
-        raise HTTPException(400, str(exc))
+        # Return a postMessage page so the opener window gets the error as a toast.
+        # A plain HTTPException would show raw JSON in the popup with no feedback to the main window.
+        return HTMLResponse(_callback_html(str(exc), ok=False, error=str(exc)))
     return RedirectResponse(url)
 
 

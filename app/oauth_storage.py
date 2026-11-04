@@ -79,7 +79,11 @@ def build_auth_url(provider: str) -> tuple[str, str]:
     state = secrets.token_urlsafe(24)
     if provider == "google":
         if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
-            raise OAuthNotConfigured("DBM_GOOGLE_CLIENT_ID/DBM_GOOGLE_CLIENT_SECRET sind nicht gesetzt.")
+            raise OAuthNotConfigured(
+                "Google Drive ist nicht konfiguriert: DBM_GOOGLE_CLIENT_ID und DBM_GOOGLE_CLIENT_SECRET "
+                "müssen als Umgebungsvariablen in der docker-compose.yml gesetzt sein. "
+                "Siehe README → 'Google Drive einrichten'."
+            )
         params = {
             "client_id": GOOGLE_CLIENT_ID,
             "redirect_uri": redirect_uri("google"),
@@ -92,7 +96,11 @@ def build_auth_url(provider: str) -> tuple[str, str]:
         url = GOOGLE_AUTH_URL + "?" + "&".join(f"{k}={requests.utils.quote(v)}" for k, v in params.items())
     elif provider == "onedrive":
         if not MS_CLIENT_ID or not MS_CLIENT_SECRET:
-            raise OAuthNotConfigured("DBM_MS_CLIENT_ID/DBM_MS_CLIENT_SECRET sind nicht gesetzt.")
+            raise OAuthNotConfigured(
+                "OneDrive ist nicht konfiguriert: DBM_MS_CLIENT_ID und DBM_MS_CLIENT_SECRET "
+                "müssen als Umgebungsvariablen in der docker-compose.yml gesetzt sein. "
+                "Siehe README → 'OneDrive einrichten'."
+            )
         params = {
             "client_id": MS_CLIENT_ID,
             "redirect_uri": redirect_uri("onedrive"),
