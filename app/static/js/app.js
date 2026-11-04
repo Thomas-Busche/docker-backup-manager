@@ -1862,7 +1862,7 @@ async function renderNetPulseCard(card) {
   });
 }
 
-function openStorageTargetModal(existing) {
+async function openStorageTargetModal(existing) {
   const overlay = h(`
     <div class="modal-overlay">
       <div class="modal">
@@ -1889,7 +1889,7 @@ function openStorageTargetModal(existing) {
   `);
   let oauthPending = null; // { provider, state } once a Google/OneDrive login popup succeeds
   const fieldsEl = overlay.querySelector("#t-config-fields");
-  function renderFields(type, cfg) {
+  async function renderFields(type, cfg) {
     cfg = cfg || {};
     if (type === "smb") {
       fieldsEl.innerHTML = `
@@ -1953,27 +1953,183 @@ function openStorageTargetModal(existing) {
         <div class="field"><label>Präfix (optional)</label><input type="text" id="cfg-prefix" value="${cfg.prefix || ""}" /></div>`;
     } else if (type === "google_drive" || type === "onedrive") {
       const provider = type === "google_drive" ? "google" : "onedrive";
-      const providerLabel = type === "google_drive" ? "Google" : "Microsoft";
-      const connected = cfg.connected || (oauthPending && oauthPending.state);
-      fieldsEl.innerHTML = `
-        <div class="field">
-          <div id="oauth-status" class="muted" style="margin-bottom:8px;">
-            ${connected
-              ? `✅ Verbunden${cfg.account ? " als <strong>" + cfg.account + "</strong>" : ""}`
-              : "Noch nicht verbunden."}
+      const providerLabel = type === "google_drive" ? "Google Drive" : "OneDrive";
+      const connected = cfg.connected || (oauthPending && oauthPending.provider === provider);
+
+      // Load OAuth app config to know if credentials are already set
+      let oauthApps = null;
+      try { oauthApps = await api("/api/settings/oauth-apps"); } catch (_) {}
+      const appCfg = oauthApps ? oauthApps[provider] : null;
+      const credConfigured = appCfg && appCfg.configured;
+
+      if (!credConfigured) {
+        // ── Setup wizard ──
+        const isOneDrive = provider === "onedrive";
+        const azureUrl = "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/CreateApplicationBlade";
+        const googleUrl = "https://console.cloud.google.com/apis/credentials/oauthclient";
+        const registerUrl = isOneDrive ? azureUrl : googleUrl;
+        const redirectPlaceholder = appCfg && appCfg.redirect_uri
+          ? escHtml(appCfg.redirect_uri)
+          : (appCfg && appCfg.public_url
+              ? escHtml(appCfg.public_url + `/api/settings/oauth/${provider}/callback`)
+              : `<em>DBM_PUBLIC_URL muss in docker-compose.yml gesetzt sein, z.B. http://192.168.1.10:8420</em>`);
+
+        fieldsEl.innerHTML = `
+          <div class="oauth-wizard">
+            <div class="wizard-steps">
+              <div class="wizard-step active" data-step="1">
+                <div class="step-num">1</div>
+                <div class="step-label">${isOneDrive ? "App registrieren" : "OAuth-Client anlegen"}</div>
+              </div>
+              <div class="wizard-step" data-step="2">
+                <div class="step-num">2</div>
+                <div class="step-label">Redirect-URI eintragen</div>
+              </div>
+              <div class="wizard-step" data-step="3">
+                <div class="step-num">3</div>
+                <div class="step-label">Client-ID &amp; Secret eingeben</div>
+              </div>
+              <div class="wizard-step" data-step="4">
+                <div class="step-num">4</div>
+                <div class="step-label">Anmelden</div>
+              </div>
+            </div>
+
+            <div class="wizard-panel" data-panel="1">
+              ${isOneDrive ? `
+              <p>Du brauchst eine kostenlose <strong>Azure App Registration</strong> – das geht auch mit einem normalen Microsoft-/Outlook-Konto, kein Firmenkonto nötig.</p>
+              <ol>
+                <li>Öffne das <a href="${registerUrl}" target="_blank" rel="noopener">Azure-Portal → App registrieren</a></li>
+                <li>Gib einen beliebigen Namen ein, z.B. <code>Docker Backup Manager</code></li>
+                <li>Wähle bei <em>Unterstützte Kontotypen</em>: <strong>Konten in einem beliebigen Organisationsverzeichnis und persönliche Microsoft-Konten</strong></li>
+                <li>Redirect-URI: noch leer lassen – kommt im nächsten Schritt</li>
+                <li>Klicke <strong>Registrieren</strong></li>
+              </ol>
+              ` : `
+              <p>Du brauchst einen <strong>Google OAuth-Client</strong> in der Google Cloud Console.</p>
+              <ol>
+                <li>Öffne die <a href="${registerUrl}" target="_blank" rel="noopener">Google Cloud Console → OAuth-Client-ID erstellen</a></li>
+                <li>Anwendungstyp: <strong>Webanwendung</strong></li>
+                <li>Gib einen beliebigen Namen ein, z.B. <code>Docker Backup Manager</code></li>
+                <li>Autorisierte Redirect-URIs: kommt im nächsten Schritt</li>
+              </ol>
+              `}
+              <button type="button" class="btn primary wizard-next" data-next="2">Weiter →</button>
+            </div>
+
+            <div class="wizard-panel hidden" data-panel="2">
+              <p>Trage diese <strong>Redirect-URI</strong> in deine App ein${isOneDrive ? " (Azure → Authentifizierung → Plattform hinzufügen → Web)" : " (Google Cloud Console → Autorisierte Redirect-URIs)"}:</p>
+              <div class="wizard-uri-box">
+                <code id="wizard-redirect-uri">${redirectPlaceholder}</code>
+                ${appCfg && appCfg.redirect_uri ? `<button type="button" class="btn wizard-copy-btn" title="Kopieren">📋</button>` : ""}
+              </div>
+              ${!appCfg || !appCfg.public_url_set ? `
+              <div class="wizard-warning">
+                ⚠️ <strong>DBM_PUBLIC_URL</strong> ist nicht gesetzt. Setze sie in deiner <code>docker-compose.yml</code>, damit die Redirect-URI korrekt ist:<br>
+                <code>DBM_PUBLIC_URL: "http://deine-ip:8420"</code>
+              </div>` : ""}
+              ${isOneDrive ? `<p style="font-size:.85rem; color:var(--muted);">Danach: Azure → Zertifikate &amp; Geheimnisse → Neuer geheimer Clientschlüssel → Wert kopieren (nur einmal sichtbar!)</p>` : ""}
+              <div style="display:flex; gap:8px;">
+                <button type="button" class="btn wizard-back" data-back="1">← Zurück</button>
+                <button type="button" class="btn primary wizard-next" data-next="3">Weiter →</button>
+              </div>
+            </div>
+
+            <div class="wizard-panel hidden" data-panel="3">
+              <p>Trage jetzt die Zugangsdaten aus ${isOneDrive ? "Azure" : "Google Cloud"} ein:</p>
+              <div class="field"><label>${isOneDrive ? "Anwendungs-ID (Client-ID)" : "Client-ID"}</label>
+                <input type="text" id="wizard-client-id" placeholder="${isOneDrive ? "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" : "xxxxx.apps.googleusercontent.com"}" autocomplete="off" /></div>
+              <div class="field"><label>${isOneDrive ? "Geheimer Clientschlüssel (Secret-Wert)" : "Clientschlüssel"}</label>
+                <input type="password" id="wizard-client-secret" autocomplete="off" /></div>
+              <div id="wizard-save-result"></div>
+              <div style="display:flex; gap:8px;">
+                <button type="button" class="btn wizard-back" data-back="2">← Zurück</button>
+                <button type="button" class="btn primary" id="wizard-save-btn">Speichern &amp; weiter →</button>
+              </div>
+            </div>
+
+            <div class="wizard-panel hidden" data-panel="4">
+              <p>✅ Zugangsdaten gespeichert. Klicke jetzt auf <strong>Anmelden</strong>, um dein ${providerLabel}-Konto zu verbinden.</p>
+              <button type="button" class="btn primary" id="oauth-connect-btn">Mit ${providerLabel} anmelden</button>
+            </div>
           </div>
-          <button type="button" class="btn" id="oauth-connect-btn">${connected ? "Neu verbinden" : "Mit " + providerLabel + " anmelden"}</button>
-        </div>
-        <div class="field"><label>Zielordner (optional, wird angelegt falls nötig)</label>
-          <input type="text" id="cfg-folder-path" placeholder="docker-backups" value="${cfg.folder_path || ""}" /></div>`;
-      fieldsEl.querySelector("#oauth-connect-btn").addEventListener("click", () => {
+          <div class="field" style="margin-top:12px;"><label>Zielordner (optional, wird angelegt falls nötig)</label>
+            <input type="text" id="cfg-folder-path" placeholder="docker-backups" value="${cfg.folder_path || ""}" /></div>`;
+
+        // Step navigation
+        const showPanel = (n) => {
+          fieldsEl.querySelectorAll(".wizard-panel").forEach((p) => p.classList.toggle("hidden", p.dataset.panel != n));
+          fieldsEl.querySelectorAll(".wizard-step").forEach((s) => {
+            s.classList.toggle("active", s.dataset.step == n);
+            s.classList.toggle("done", s.dataset.step < n);
+          });
+        };
+        fieldsEl.querySelectorAll(".wizard-next").forEach((btn) =>
+          btn.addEventListener("click", () => showPanel(btn.dataset.next)));
+        fieldsEl.querySelectorAll(".wizard-back").forEach((btn) =>
+          btn.addEventListener("click", () => showPanel(btn.dataset.back)));
+
+        const copyBtn = fieldsEl.querySelector(".wizard-copy-btn");
+        if (copyBtn) copyBtn.addEventListener("click", () => {
+          navigator.clipboard.writeText(fieldsEl.querySelector("#wizard-redirect-uri").textContent).catch(() => {});
+          copyBtn.textContent = "✓";
+          setTimeout(() => { copyBtn.textContent = "📋"; }, 1500);
+        });
+
+        fieldsEl.querySelector("#wizard-save-btn").addEventListener("click", async () => {
+          const btn = fieldsEl.querySelector("#wizard-save-btn");
+          const result = fieldsEl.querySelector("#wizard-save-result");
+          const clientId = fieldsEl.querySelector("#wizard-client-id").value.trim();
+          const clientSecret = fieldsEl.querySelector("#wizard-client-secret").value.trim();
+          if (!clientId || !clientSecret) { result.innerHTML = '<span class="badge failed">Client-ID und Secret müssen ausgefüllt sein.</span>'; return; }
+          btn.disabled = true;
+          result.innerHTML = '<span class="muted">Speichere …</span>';
+          try {
+            await api(`/api/settings/oauth-apps/${provider}`, {
+              method: "PUT", body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+            });
+            showPanel(4);
+          } catch (e) {
+            result.innerHTML = `<span class="badge failed">${escHtml(e.message)}</span>`;
+          } finally { btn.disabled = false; }
+        });
+      } else {
+        // ── Credentials already configured: show normal connect button ──
+        fieldsEl.innerHTML = `
+          <div class="field">
+            <div id="oauth-status" class="muted" style="margin-bottom:8px;">
+              ${connected
+                ? `✅ Verbunden${cfg.account ? " als <strong>" + escHtml(cfg.account) + "</strong>" : ""}`
+                : (appCfg.from_env
+                    ? "App via Umgebungsvariablen konfiguriert."
+                    : "App über den Assistenten konfiguriert.")}
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+              <button type="button" class="btn primary" id="oauth-connect-btn">${connected ? "Neu verbinden" : "Mit " + providerLabel + " anmelden"}</button>
+              ${!appCfg.from_env ? `<button type="button" class="btn" id="oauth-reconfigure-btn">App-Zugangsdaten ändern</button>` : ""}
+            </div>
+          </div>
+          <div class="field"><label>Zielordner (optional, wird angelegt falls nötig)</label>
+            <input type="text" id="cfg-folder-path" placeholder="docker-backups" value="${cfg.folder_path || ""}" /></div>`;
+
+        const reconfigBtn = fieldsEl.querySelector("#oauth-reconfigure-btn");
+        if (reconfigBtn) reconfigBtn.addEventListener("click", () => {
+          // Clear DB credentials and re-render wizard
+          api(`/api/settings/oauth-apps/${provider}`, {
+            method: "PUT", body: JSON.stringify({ client_id: "", client_secret: " " }),
+          }).then(() => renderFields(type, cfg)).catch((e) => toast(e.message, "error"));
+        });
+      }
+
+      const connectBtn = fieldsEl.querySelector("#oauth-connect-btn");
+      if (connectBtn) connectBtn.addEventListener("click", () => {
         const popup = window.open(`/api/settings/oauth/${provider}/start`, "dbm-oauth", "width=520,height=650");
         const onMessage = (event) => {
           if (event.origin !== window.location.origin || !event.data || !event.data.dbmOAuth) return;
           window.removeEventListener("message", onMessage);
           if (!event.data.ok) { toast(`Anmeldung fehlgeschlagen: ${event.data.error}`, "error"); return; }
           oauthPending = { provider, state: event.data.state };
-          toast("Erfolgreich verbunden - Speichern nicht vergessen");
+          toast("Erfolgreich verbunden – Speichern nicht vergessen");
           renderFields(type, cfg);
         };
         window.addEventListener("message", onMessage);

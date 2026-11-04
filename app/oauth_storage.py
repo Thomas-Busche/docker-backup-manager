@@ -49,6 +49,28 @@ _PENDING_TTL_SECONDS = 15 * 60
 _pending: dict[str, dict] = {}  # state -> {provider, refresh_token, account, created_at}
 
 
+def _get_credentials(provider: str) -> tuple[str, str]:
+    """Return (client_id, client_secret) for a provider.
+    Env vars take priority; falls back to values stored in AppSetting via the UI wizard."""
+    if provider == "google":
+        if GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
+            return GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET
+        key_id, key_sec = "oauth_google_client_id", "oauth_google_client_secret"
+    elif provider == "onedrive":
+        if MS_CLIENT_ID and MS_CLIENT_SECRET:
+            return MS_CLIENT_ID, MS_CLIENT_SECRET
+        key_id, key_sec = "oauth_ms_client_id", "oauth_ms_client_secret"
+    else:
+        return "", ""
+
+    from app.database import SessionLocal
+    from app.models import AppSetting
+    with SessionLocal() as db:
+        row_id = db.query(AppSetting).filter_by(key=key_id).first()
+        row_sec = db.query(AppSetting).filter_by(key=key_sec).first()
+        return (row_id.value if row_id else ""), (row_sec.value if row_sec else "")
+
+
 class OAuthNotConfigured(Exception):
     pass
 
@@ -77,15 +99,16 @@ def build_auth_url(provider: str) -> tuple[str, str]:
     the exchanged tokens once the provider redirects back."""
     _cleanup_pending()
     state = secrets.token_urlsafe(24)
+    client_id, client_secret = _get_credentials(provider)
     if provider == "google":
-        if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        if not client_id or not client_secret:
             raise OAuthNotConfigured(
-                "Google Drive ist nicht konfiguriert: DBM_GOOGLE_CLIENT_ID und DBM_GOOGLE_CLIENT_SECRET "
-                "müssen als Umgebungsvariablen in der docker-compose.yml gesetzt sein. "
-                "Siehe README → 'Google Drive einrichten'."
+                "Google Drive ist nicht konfiguriert. Bitte Client-ID und Secret über den "
+                "Einrichtungs-Assistenten eingeben oder DBM_GOOGLE_CLIENT_ID/DBM_GOOGLE_CLIENT_SECRET "
+                "in der docker-compose.yml setzen."
             )
         params = {
-            "client_id": GOOGLE_CLIENT_ID,
+            "client_id": client_id,
             "redirect_uri": redirect_uri("google"),
             "response_type": "code",
             "scope": GOOGLE_DRIVE_SCOPE,
@@ -95,14 +118,14 @@ def build_auth_url(provider: str) -> tuple[str, str]:
         }
         url = GOOGLE_AUTH_URL + "?" + "&".join(f"{k}={requests.utils.quote(v)}" for k, v in params.items())
     elif provider == "onedrive":
-        if not MS_CLIENT_ID or not MS_CLIENT_SECRET:
+        if not client_id or not client_secret:
             raise OAuthNotConfigured(
-                "OneDrive ist nicht konfiguriert: DBM_MS_CLIENT_ID und DBM_MS_CLIENT_SECRET "
-                "müssen als Umgebungsvariablen in der docker-compose.yml gesetzt sein. "
-                "Siehe README → 'OneDrive einrichten'."
+                "OneDrive ist nicht konfiguriert. Bitte Client-ID und Secret über den "
+                "Einrichtungs-Assistenten eingeben oder DBM_MS_CLIENT_ID/DBM_MS_CLIENT_SECRET "
+                "in der docker-compose.yml setzen."
             )
         params = {
-            "client_id": MS_CLIENT_ID,
+            "client_id": client_id,
             "redirect_uri": redirect_uri("onedrive"),
             "response_type": "code",
             "scope": MS_SCOPE,
@@ -117,11 +140,12 @@ def build_auth_url(provider: str) -> tuple[str, str]:
 def handle_callback(provider: str, code: str, state: str) -> None:
     """Exchanges the authorization code for tokens and stashes the refresh
     token server-side under `state`, for oauth-complete to pick up."""
+    client_id, client_secret = _get_credentials(provider)
     if provider == "google":
         resp = requests.post(GOOGLE_TOKEN_URL, data={
             "code": code,
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
+            "client_id": client_id,
+            "client_secret": client_secret,
             "redirect_uri": redirect_uri("google"),
             "grant_type": "authorization_code",
         }, timeout=30)
@@ -131,8 +155,8 @@ def handle_callback(provider: str, code: str, state: str) -> None:
     elif provider == "onedrive":
         resp = requests.post(MS_TOKEN_URL, data={
             "code": code,
-            "client_id": MS_CLIENT_ID,
-            "client_secret": MS_CLIENT_SECRET,
+            "client_id": client_id,
+            "client_secret": client_secret,
             "redirect_uri": redirect_uri("onedrive"),
             "grant_type": "authorization_code",
             "scope": MS_SCOPE,
@@ -176,18 +200,19 @@ def _onedrive_account_email(access_token: str) -> str:
 
 
 def _refresh_access_token(provider: str, refresh_token: str) -> str:
+    client_id, client_secret = _get_credentials(provider)
     if provider == "google":
         resp = requests.post(GOOGLE_TOKEN_URL, data={
             "refresh_token": refresh_token,
-            "client_id": GOOGLE_CLIENT_ID,
-            "client_secret": GOOGLE_CLIENT_SECRET,
+            "client_id": client_id,
+            "client_secret": client_secret,
             "grant_type": "refresh_token",
         }, timeout=30)
     elif provider == "onedrive":
         resp = requests.post(MS_TOKEN_URL, data={
             "refresh_token": refresh_token,
-            "client_id": MS_CLIENT_ID,
-            "client_secret": MS_CLIENT_SECRET,
+            "client_id": client_id,
+            "client_secret": client_secret,
             "grant_type": "refresh_token",
             "scope": MS_SCOPE,
         }, timeout=30)

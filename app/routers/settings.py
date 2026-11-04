@@ -20,7 +20,7 @@ from app.auth import get_admin_user, get_current_user
 from app.config import APP_VERSION, BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, GITHUB_REPO, SESSION_MAX_AGE, TZ_ERROR, TZ_NAME
 from app.database import get_db
 from app.docker_client import is_available
-from app.models import BackupRecord, Schedule, StorageTarget, User
+from app.models import AppSetting, BackupRecord, Schedule, StorageTarget, User
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -462,6 +462,60 @@ def oauth_complete(payload: OAuthCompletePayload, db: Session = Depends(get_db),
     db.commit()
     db.refresh(target)
     return {"id": target.id, "account": pending["account"]}
+
+
+# ── OAuth app credentials (wizard) ──────────────────────────────────────────
+
+class OAuthAppPayload(BaseModel):
+    client_id: str
+    client_secret: str = ""  # empty = keep existing
+
+
+def _upsert_setting(db: Session, key: str, value: str) -> None:
+    row = db.query(AppSetting).filter_by(key=key).first()
+    if row:
+        row.value = value
+    else:
+        db.add(AppSetting(key=key, value=value))
+
+
+@router.get("/oauth-apps")
+def get_oauth_apps(user: User = Depends(get_admin_user)):
+    """Return configuration state for each OAuth provider (IDs only, no secrets)."""
+    from app import config as cfg
+    result = {}
+    for provider in ("onedrive", "google"):
+        client_id, client_secret = oauth_storage._get_credentials(provider)
+        from_env = (
+            bool(cfg.MS_CLIENT_ID and cfg.MS_CLIENT_SECRET)
+            if provider == "onedrive"
+            else bool(cfg.GOOGLE_CLIENT_ID and cfg.GOOGLE_CLIENT_SECRET)
+        )
+        redirect = ""
+        if cfg.PUBLIC_URL:
+            redirect = f"{cfg.PUBLIC_URL}/api/settings/oauth/{provider}/callback"
+        result[provider] = {
+            "configured": bool(client_id and client_secret),
+            "client_id": client_id,
+            "from_env": from_env,
+            "redirect_uri": redirect,
+            "public_url_set": bool(cfg.PUBLIC_URL),
+            "public_url": cfg.PUBLIC_URL,
+        }
+    return result
+
+
+@router.put("/oauth-apps/{provider}")
+def save_oauth_app(provider: str, payload: OAuthAppPayload,
+                   db: Session = Depends(get_db), user: User = Depends(get_admin_user)):
+    if provider not in ("onedrive", "google"):
+        raise HTTPException(404, "Unknown provider")
+    prefix = "oauth_ms" if provider == "onedrive" else "oauth_google"
+    _upsert_setting(db, f"{prefix}_client_id", payload.client_id.strip())
+    if payload.client_secret:
+        _upsert_setting(db, f"{prefix}_client_secret", payload.client_secret.strip())
+    db.commit()
+    return {"ok": True}
 
 
 # ── Config export / import ──────────────────────────────────────────────────
