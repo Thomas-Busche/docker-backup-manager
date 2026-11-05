@@ -43,7 +43,7 @@ GOOGLE_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 
 MS_AUTH_URL = f"https://login.microsoftonline.com/{MS_TENANT}/oauth2/v2.0/authorize"
 MS_TOKEN_URL = f"https://login.microsoftonline.com/{MS_TENANT}/oauth2/v2.0/token"
-MS_SCOPE = "offline_access Files.ReadWrite"
+MS_SCOPE = "offline_access Files.ReadWrite User.Read"
 
 _PENDING_TTL_SECONDS = 15 * 60
 _pending: dict[str, dict] = {}  # state -> {provider, refresh_token, account, created_at}
@@ -205,11 +205,14 @@ def _google_account_email(access_token: str) -> str:
 
 
 def _onedrive_account_email(access_token: str) -> str:
-    resp = requests.get("https://graph.microsoft.com/v1.0/me",
-                         headers={"Authorization": f"Bearer {access_token}"}, timeout=15)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("mail") or data.get("userPrincipalName", "")
+    try:
+        resp = requests.get("https://graph.microsoft.com/v1.0/me",
+                             headers={"Authorization": f"Bearer {access_token}"}, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("mail") or data.get("userPrincipalName", "")
+    except Exception:
+        return ""
 
 
 def _refresh_access_token(provider: str, refresh_token: str) -> str:
