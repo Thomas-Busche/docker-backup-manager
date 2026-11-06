@@ -646,7 +646,7 @@ async function backupsPage() {
     <div id="groups"></div>
   </div>`);
   const groupsEl = wrap.querySelector("#groups");
-  const names = Object.keys(data.groups);
+  const names = Object.keys(data.groups).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   if (!names.length) {
     groupsEl.appendChild(h(`<div class="empty-state">Noch keine Backups vorhanden</div>`));
     return wrap;
@@ -665,6 +665,22 @@ async function backupsPage() {
 
   const containerNames = names.filter((n) => !landscapeNames.includes(n) && !landscapeMembers.has(n));
 
+  const targetsMap = data.targets || {};
+  const TARGET_ICONS = {
+    smb: "🗂️", s3: "☁️", onedrive: "🔵", google_drive: "🟡", rclone: "📡",
+    local_path: "💾", webdav: "🌐",
+  };
+  function targetBadges(ids, streamed) {
+    const allIds = [...new Set([...(ids || []), ...(streamed != null ? [streamed] : [])])];
+    if (!allIds.length) return '<span class="badge" style="background:var(--muted-bg,#555);color:var(--muted)">lokal</span>';
+    return allIds.map((id) => {
+      const t = targetsMap[id];
+      if (!t) return "";
+      const icon = TARGET_ICONS[t.type] || "📁";
+      return `<span class="badge ok" style="font-size:.7rem;padding:2px 6px;" title="${escHtml(t.type)}">${icon} ${escHtml(t.name)}</span>`;
+    }).join(" ");
+  }
+
   function buildAccordion(name, versions, isLandscape) {
     // For landscapes, sum the member_size_bytes across versions (the landscape
     // record itself is just a tiny metadata file — the real data is in the members)
@@ -672,13 +688,23 @@ async function backupsPage() {
       ? versions.reduce((s, v) => s + (v.member_size_bytes || v.size_bytes || 0), 0)
       : versions.reduce((s, v) => s + (v.size_bytes || 0), 0);
     const icon = isLandscape ? "🗺️" : "📦";
+
+    // Collect all target IDs used across versions of this group for the header
+    const groupTargetIds = [...new Set(versions.flatMap((v) => [
+      ...(v.synced_target_ids || []),
+      ...(v.streamed_target_id != null ? [v.streamed_target_id] : []),
+    ]))];
+    const groupStreamed = versions.some((v) => v.streamed_target_id != null);
+    const headerBadges = targetBadges(groupTargetIds, groupStreamed ? null : undefined);
+
     const acc = h(`
       <div class="accordion${isLandscape ? " accordion-landscape" : ""}">
         <div class="accordion-head">
-          <div style="display:flex; align-items:center; gap:8px;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
             <span>${icon}</span>
             <strong>${escHtml(name)}</strong>
             <span class="muted">(${versions.length} Version${versions.length === 1 ? "" : "en"}, ${fmtBytes(totalSize)})</span>
+            <span style="margin-left:4px;">${headerBadges}</span>
           </div>
           <div style="display:flex; align-items:center; gap:10px;">
             ${isLandscape ? '<button class="btn danger delete-all-btn" style="font-size:.78rem; padding:5px 10px;">Alle löschen</button>' : ''}
@@ -693,7 +719,7 @@ async function backupsPage() {
           <table>
             <thead><tr>
               <th style="width:36px; padding-right:0;"><input type="checkbox" class="select-all-cb" style="width:auto; margin:0; cursor:pointer;" title="Alle auswählen"></th>
-              <th>Erstellt</th><th>Größe</th><th>Status</th><th></th>
+              <th>Erstellt</th><th>Größe</th><th>Speicherort</th><th>Status</th><th></th>
             </tr></thead>
             <tbody></tbody>
           </table>
@@ -769,6 +795,7 @@ async function backupsPage() {
         <td style="width:36px; padding-right:0; vertical-align:middle;"><input type="checkbox" class="row-cb" data-id="${v.id}" style="width:auto; margin:0; cursor:pointer;"></td>
         <td>${fmtDate(v.created_at)}</td>
         <td>${fmtBytes(displaySize)}</td>
+        <td>${targetBadges(v.synced_target_ids, v.streamed_target_id)}</td>
         <td><span class="badge ${v.status === "ok" ? "ok" : "failed"}">${v.status}</span></td>
         <td style="display:flex; gap:8px;">
           ${isLsc

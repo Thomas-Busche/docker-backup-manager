@@ -24,6 +24,7 @@ router = APIRouter(prefix="/api/backups", tags=["backups"])
 
 @router.get("")
 def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    from app.models import StorageTarget
     records = db.query(BackupRecord).order_by(BackupRecord.created_at.desc()).all()
 
     # Self-heal: a successful backup whose directory no longer exists on disk
@@ -63,13 +64,18 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
             "size_bytes": r.size_bytes,
             "created_at": r.created_at.isoformat() + "Z",
             "containers": json.loads(r.containers_json) if r.containers_json else [],
+            "synced_target_ids": json.loads(r.synced_target_ids) if r.synced_target_ids else [],
+            "streamed_target_id": r.streamed_target_id,
         }
         if r.backup_type == "landscape":
             member_names, member_size = _landscape_member_info(r, records_by_path, records_latest_by_name)
             entry["member_names"] = member_names
             entry["member_size_bytes"] = member_size
         grouped.setdefault(r.name, []).append(entry)
-    return {"groups": grouped}
+
+    targets = db.query(StorageTarget).all()
+    targets_map = {t.id: {"name": t.name, "type": t.type} for t in targets}
+    return {"groups": grouped, "targets": targets_map}
 
 
 def _read_member_jsons(landscape_dir: Path) -> list[dict]:
