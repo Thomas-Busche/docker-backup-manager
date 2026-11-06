@@ -445,6 +445,8 @@ def oauth_complete(payload: OAuthCompletePayload, db: Session = Depends(get_db),
         "account": pending["account"],
         "folder_path": payload.folder_path.strip("/"),
     }
+    if pending.get("device_client_id"):
+        config["device_client_id"] = pending["device_client_id"]
 
     if payload.target_id is not None:
         target = db.query(StorageTarget).filter(StorageTarget.id == payload.target_id).first()

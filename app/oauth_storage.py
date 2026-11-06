@@ -224,23 +224,33 @@ def _onedrive_account_email(access_token: str) -> str:
         return ""
 
 
-def _refresh_access_token(provider: str, refresh_token: str) -> str:
-    client_id, client_secret = _get_credentials(provider)
+def _refresh_access_token(provider: str, refresh_token: str, config: dict | None = None) -> str:
+    # Device-flow tokens must be refreshed with the same public client (no secret).
+    device_client_id = (config or {}).get("device_client_id", "")
+    if device_client_id:
+        client_id, client_secret = device_client_id, ""
+    else:
+        client_id, client_secret = _get_credentials(provider)
+
     if provider == "google":
-        resp = requests.post(GOOGLE_TOKEN_URL, data={
+        data = {
             "refresh_token": refresh_token,
             "client_id": client_id,
-            "client_secret": client_secret,
             "grant_type": "refresh_token",
-        }, timeout=30)
+        }
+        if client_secret:
+            data["client_secret"] = client_secret
+        resp = requests.post(GOOGLE_TOKEN_URL, data=data, timeout=30)
     elif provider == "onedrive":
-        resp = requests.post(MS_TOKEN_URL, data={
+        data = {
             "refresh_token": refresh_token,
             "client_id": client_id,
-            "client_secret": client_secret,
             "grant_type": "refresh_token",
             "scope": MS_SCOPE,
-        }, timeout=30)
+        }
+        if client_secret:
+            data["client_secret"] = client_secret
+        resp = requests.post(MS_TOKEN_URL, data=data, timeout=30)
     else:
         raise ValueError(f"Unknown OAuth provider: {provider}")
     resp.raise_for_status()
@@ -349,14 +359,14 @@ def sync_google_drive(backup_path: Path, config: dict) -> None:
 # ---------- OneDrive ----------
 
 def check_onedrive_connection(config: dict) -> None:
-    access_token = _refresh_access_token("onedrive", config["refresh_token"])
+    access_token = _refresh_access_token("onedrive", config["refresh_token"], config)
     resp = requests.get("https://graph.microsoft.com/v1.0/me/drive",
                          headers={"Authorization": f"Bearer {access_token}"}, timeout=15)
     resp.raise_for_status()
 
 
 def delete_onedrive(config: dict, relative_key: str) -> None:
-    access_token = _refresh_access_token("onedrive", config["refresh_token"])
+    access_token = _refresh_access_token("onedrive", config["refresh_token"], config)
     folder_path = config.get("folder_path", "").strip("/")
     remote_parts = [p for p in [folder_path, relative_key] if p and p != "."]
     remote_path = "/".join(remote_parts)
@@ -367,7 +377,7 @@ def delete_onedrive(config: dict, relative_key: str) -> None:
 
 
 def sync_onedrive(backup_path: Path, config: dict) -> None:
-    access_token = _refresh_access_token("onedrive", config["refresh_token"])
+    access_token = _refresh_access_token("onedrive", config["refresh_token"], config)
     key_root = _relative_key(backup_path)
     folder_path = config.get("folder_path", "").strip("/")
 
@@ -496,6 +506,7 @@ def device_flow_poll(key: str) -> dict:
         "refresh_token": refresh_token,
         "account": account,
         "created_at": time.time(),
+        "device_client_id": _MS_DEVICE_CLIENT_ID,
     }
     session["state"] = state
     return {"status": "ready", "state": state}
