@@ -1963,175 +1963,334 @@ async function openStorageTargetModal(existing) {
       const credConfigured = appCfg && appCfg.configured;
 
       if (!credConfigured) {
-        // ── Setup wizard ──
         const isOneDrive = provider === "onedrive";
-        const azureUrl = "https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/CreateApplicationBlade";
         const googleUrl = "https://console.cloud.google.com/apis/credentials/oauthclient";
-        const registerUrl = isOneDrive ? azureUrl : googleUrl;
         const redirectPlaceholder = appCfg && appCfg.redirect_uri
           ? escHtml(appCfg.redirect_uri)
           : (appCfg && appCfg.public_url
               ? escHtml(appCfg.public_url + `/api/settings/oauth/${provider}/callback`)
               : `<em>DBM_PUBLIC_URL muss in docker-compose.yml gesetzt sein, z.B. http://192.168.1.10:8420</em>`);
 
-        fieldsEl.innerHTML = `
-          <div class="oauth-wizard">
-            <div class="wizard-steps">
-              <div class="wizard-step active" data-step="1">
-                <div class="step-num">1</div>
-                <div class="step-label">${isOneDrive ? "App registrieren" : "OAuth-Client anlegen"}</div>
-              </div>
-              <div class="wizard-step" data-step="2">
-                <div class="step-num">2</div>
-                <div class="step-label">Redirect-URI eintragen</div>
-              </div>
-              <div class="wizard-step" data-step="3">
-                <div class="step-num">3</div>
-                <div class="step-label">Client-ID &amp; Secret eingeben</div>
-              </div>
-              <div class="wizard-step" data-step="4">
-                <div class="step-num">4</div>
-                <div class="step-label">Anmelden</div>
-              </div>
-            </div>
-
-            <div class="wizard-panel" data-panel="1">
-              ${isOneDrive ? `
-              <p>Du brauchst eine <strong>Azure App Registration</strong>. Microsoft erfordert dafür ein Azure-Verzeichnis (kostenlos).</p>
-              <div class="wizard-warning" style="margin-bottom:10px;">
-                ℹ️ <strong>Fehlermeldung „außerhalb eines Verzeichnisses"?</strong><br>
-                Dein Microsoft-Konto hat noch kein Azure-Verzeichnis. Einmalig <a href="https://azure.microsoft.com/free/" target="_blank" rel="noopener">kostenlos bei Azure registrieren</a> (nur zur Identitätsprüfung, keine Kosten). Danach läuft die App-Registrierung normal.<br>
-                <strong>Alternative ohne Azure:</strong> OneDrive lässt sich auch über <strong>rclone</strong> einbinden – kein Azure-Konto nötig, dafür einmalige Einrichtung per Kommandozeile (siehe Speicherziel-Typ „rclone").
-              </div>
-              <ol>
-                <li>Öffne das <a href="${registerUrl}" target="_blank" rel="noopener">Azure-Portal → App registrieren</a></li>
-                <li>Gib einen beliebigen Namen ein, z.B. <code>Docker Backup Manager</code></li>
-                <li>Wähle bei <em>Unterstützte Kontotypen</em>: <strong>Konten in einem beliebigen Organisationsverzeichnis und persönliche Microsoft-Konten</strong></li>
-                <li>Redirect-URI: noch leer lassen – kommt im nächsten Schritt</li>
-                <li>Klicke <strong>Registrieren</strong></li>
-              </ol>
-              ` : `
-              <div class="wizard-warning" style="margin-bottom:10px;">
-                ⚠️ <strong>Google erlaubt keine privaten IP-Adressen</strong> (10.x, 192.168.x) als Redirect-URI.<br>
-                Als DBM-Adresse muss daher <strong>eine dieser Optionen</strong> funktionieren:<br>
-                <ul style="margin:6px 0 0; padding-left:18px;">
-                  <li><code>http://localhost:8420</code> – nur wenn Browser und DBM auf <em>demselben</em> Rechner laufen</li>
-                  <li>Ein lokaler Hostname, z.B. <code>http://dbm.home:8420</code> – eingetragen in lokaler DNS oder <code>/etc/hosts</code></li>
-                  <li>Ein echter Domain-Name mit Reverse Proxy</li>
-                </ul>
-                <strong>Einfachste Alternative:</strong> Google Drive über <strong>rclone</strong> einbinden – kein eigenes OAuth nötig, kein IP-Problem (Speicherziel-Typ „rclone").
-              </div>
-              <p>Du brauchst einen <strong>Google OAuth-Client</strong> in der Google Cloud Console.</p>
-              <ol>
-                <li>Öffne die <a href="${registerUrl}" target="_blank" rel="noopener">Google Cloud Console → OAuth-Client-ID erstellen</a></li>
-                <li>Anwendungstyp: <strong>Webanwendung</strong></li>
-                <li>Gib einen beliebigen Namen ein, z.B. <code>Docker Backup Manager</code></li>
-                <li>Autorisierte Redirect-URIs: kommt im nächsten Schritt</li>
-              </ol>
-              `}
-              <button type="button" class="btn primary wizard-next" data-next="2">Weiter →</button>
-            </div>
-
-            <div class="wizard-panel hidden" data-panel="2">
-              ${!appCfg || !appCfg.public_url_set ? `
-              <div class="wizard-warning" style="margin-bottom:12px;">
-                <strong>Zuerst: Deine DBM-Adresse eintragen</strong><br>
-                Damit die Redirect-URI korrekt ist, muss DBM wissen, unter welcher Adresse es im Browser erreichbar ist.
-                <div style="display:flex; gap:8px; margin-top:8px; align-items:center; flex-wrap:wrap;">
-                  <input type="text" id="wizard-public-url" placeholder="http://192.168.1.10:8420" style="flex:1; min-width:200px;" />
-                  <button type="button" class="btn" id="wizard-save-url-btn">Speichern</button>
+        if (isOneDrive) {
+          // ── OneDrive: Device Code Flow (primary) + Azure wizard (fallback) ──
+          fieldsEl.innerHTML = `
+            <div class="oauth-wizard">
+              <div id="device-flow-wrapper">
+                <p style="margin:0 0 6px;font-weight:600">Mit Microsoft anmelden – kein Azure-Konto nötig</p>
+                <div id="device-start-area">
+                  <p class="muted" style="margin:0 0 10px;font-size:.88rem">Klicke auf den Button. Du bekommst dann einen Code und einen Link zu Microsoft. Gib den Code dort ein – fertig.</p>
+                  <button type="button" class="btn primary" id="device-start-btn">Mit Microsoft anmelden</button>
                 </div>
-                <div id="wizard-url-result" style="margin-top:4px; font-size:.82rem;"></div>
-              </div>` : ""}
-              <p>Trage diese <strong>Redirect-URI</strong> in deine App ein${isOneDrive ? " (Azure → Authentifizierung → Plattform hinzufügen → Web)" : " (Google Cloud Console → Autorisierte Redirect-URIs)"}:</p>
-              <div class="wizard-uri-box">
-                <code id="wizard-redirect-uri">${redirectPlaceholder}</code>
-                <button type="button" class="btn wizard-copy-btn" title="Kopieren" ${!appCfg || !appCfg.redirect_uri ? "disabled" : ""}>📋</button>
+                <div id="device-code-panel" class="hidden">
+                  <p style="margin:0 0 6px">1. Öffne diesen Link: <a id="device-verify-link" href="" target="_blank" rel="noopener" style="font-weight:600">microsoft.com/devicelogin</a></p>
+                  <p style="margin:0 0 8px">2. Gib diesen Code ein:</p>
+                  <div class="wizard-uri-box" style="margin-bottom:10px;">
+                    <code id="device-user-code" style="font-size:1.5rem;letter-spacing:.15em;font-weight:700">----</code>
+                    <button type="button" class="btn" id="device-copy-btn">📋</button>
+                  </div>
+                  <div id="device-status" class="muted" style="font-size:.88rem">⏳ Warte auf Anmeldung…</div>
+                  <button type="button" class="btn" id="device-cancel-btn" style="margin-top:8px; font-size:.82rem">Abbrechen</button>
+                </div>
               </div>
-              ${isOneDrive ? `<p style="font-size:.85rem; color:var(--muted);">Danach: Azure → Zertifikate &amp; Geheimnisse → Neuer geheimer Clientschlüssel → Wert kopieren (nur einmal sichtbar!)</p>` : ""}
-              <div style="display:flex; gap:8px;">
-                <button type="button" class="btn wizard-back" data-back="1">← Zurück</button>
-                <button type="button" class="btn primary wizard-next" data-next="3">Weiter →</button>
-              </div>
-            </div>
 
-            <div class="wizard-panel hidden" data-panel="3">
-              <p>Trage jetzt die Zugangsdaten aus ${isOneDrive ? "Azure" : "Google Cloud"} ein:</p>
-              <div class="field"><label>${isOneDrive ? "Anwendungs-ID (Client-ID)" : "Client-ID"}</label>
-                <input type="text" id="wizard-client-id" placeholder="${isOneDrive ? "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" : "xxxxx.apps.googleusercontent.com"}" autocomplete="off" /></div>
-              <div class="field"><label>${isOneDrive ? "Geheimer Clientschlüssel (Secret-Wert)" : "Clientschlüssel"}</label>
-                <input type="password" id="wizard-client-secret" autocomplete="off" /></div>
-              <div id="wizard-save-result"></div>
-              <div style="display:flex; gap:8px;">
-                <button type="button" class="btn wizard-back" data-back="2">← Zurück</button>
-                <button type="button" class="btn primary" id="wizard-save-btn">Speichern &amp; weiter →</button>
-              </div>
+              <details style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px;">
+                <summary style="cursor:pointer;font-size:.82rem;color:var(--muted);list-style:none;display:flex;align-items:center;gap:6px;">
+                  <span style="font-size:.7rem">▶</span> Eigene Azure-App verwenden (für Firmen / falls der Button oben nicht funktioniert)
+                </summary>
+                <div id="azure-wizard-inner" style="margin-top:14px;">
+                  <div class="wizard-steps">
+                    <div class="wizard-step active" data-step="1"><div class="step-num">1</div><div class="step-label">App registrieren</div></div>
+                    <div class="wizard-step" data-step="2"><div class="step-num">2</div><div class="step-label">Redirect-URI</div></div>
+                    <div class="wizard-step" data-step="3"><div class="step-num">3</div><div class="step-label">Zugangsdaten</div></div>
+                    <div class="wizard-step" data-step="4"><div class="step-num">4</div><div class="step-label">Anmelden</div></div>
+                  </div>
+                  <div class="wizard-panel" data-panel="1">
+                    <p>Du brauchst eine <strong>Azure App Registration</strong>.</p>
+                    <div class="wizard-warning" style="margin-bottom:10px;">
+                      ℹ️ <strong>Fehlermeldung „außerhalb eines Verzeichnisses"?</strong><br>
+                      Dein Microsoft-Konto hat noch kein Azure-Verzeichnis. Einmalig <a href="https://azure.microsoft.com/free/" target="_blank" rel="noopener">kostenlos bei Azure registrieren</a> (nur zur Identitätsprüfung, keine Kosten).
+                    </div>
+                    <ol>
+                      <li>Öffne das <a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/CreateApplicationBlade" target="_blank" rel="noopener">Azure-Portal → App registrieren</a></li>
+                      <li>Name: <code>Docker Backup Manager</code></li>
+                      <li>Kontotypen: <strong>Konten in einem beliebigen Organisationsverzeichnis und persönliche Microsoft-Konten</strong></li>
+                      <li>Redirect-URI: noch leer lassen</li>
+                      <li>Klicke <strong>Registrieren</strong></li>
+                    </ol>
+                    <button type="button" class="btn primary az-next" data-next="2">Weiter →</button>
+                  </div>
+                  <div class="wizard-panel hidden" data-panel="2">
+                    ${!appCfg || !appCfg.public_url_set ? `
+                    <div class="wizard-warning" style="margin-bottom:12px;">
+                      <strong>Zuerst: DBM-Adresse eintragen</strong>
+                      <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap;">
+                        <input type="text" id="wizard-public-url" placeholder="http://192.168.1.10:8420" style="flex:1;min-width:200px;" />
+                        <button type="button" class="btn" id="wizard-save-url-btn">Speichern</button>
+                      </div>
+                      <div id="wizard-url-result" style="margin-top:4px;font-size:.82rem;"></div>
+                    </div>` : ""}
+                    <p>Trage diese <strong>Redirect-URI</strong> in Azure ein (Authentifizierung → Plattform hinzufügen → Web):</p>
+                    <div class="wizard-uri-box">
+                      <code id="wizard-redirect-uri">${redirectPlaceholder}</code>
+                      <button type="button" class="btn wizard-copy-btn" title="Kopieren" ${!appCfg || !appCfg.redirect_uri ? "disabled" : ""}>📋</button>
+                    </div>
+                    <p style="font-size:.85rem;color:var(--muted);">Danach: Azure → Zertifikate &amp; Geheimnisse → Neuer geheimer Clientschlüssel → Wert kopieren.</p>
+                    <div style="display:flex;gap:8px;">
+                      <button type="button" class="btn az-back" data-back="1">← Zurück</button>
+                      <button type="button" class="btn primary az-next" data-next="3">Weiter →</button>
+                    </div>
+                  </div>
+                  <div class="wizard-panel hidden" data-panel="3">
+                    <div class="field"><label>Anwendungs-ID (Client-ID)</label>
+                      <input type="text" id="wizard-client-id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autocomplete="off" /></div>
+                    <div class="field"><label>Geheimer Clientschlüssel</label>
+                      <input type="password" id="wizard-client-secret" autocomplete="off" /></div>
+                    <div id="wizard-save-result"></div>
+                    <div style="display:flex;gap:8px;">
+                      <button type="button" class="btn az-back" data-back="2">← Zurück</button>
+                      <button type="button" class="btn primary" id="wizard-save-btn">Speichern &amp; weiter →</button>
+                    </div>
+                  </div>
+                  <div class="wizard-panel hidden" data-panel="4">
+                    <p>✅ Zugangsdaten gespeichert.</p>
+                    <button type="button" class="btn primary" id="oauth-connect-btn">Mit OneDrive anmelden</button>
+                  </div>
+                </div>
+              </details>
             </div>
+            <div class="field" style="margin-top:12px;"><label>Zielordner (optional, wird angelegt falls nötig)</label>
+              <input type="text" id="cfg-folder-path" placeholder="docker-backups" value="${cfg.folder_path || ""}" /></div>`;
 
-            <div class="wizard-panel hidden" data-panel="4">
-              <p>✅ Zugangsdaten gespeichert. Klicke jetzt auf <strong>Anmelden</strong>, um dein ${providerLabel}-Konto zu verbinden.</p>
-              <button type="button" class="btn primary" id="oauth-connect-btn">Mit ${providerLabel} anmelden</button>
-            </div>
-          </div>
-          <div class="field" style="margin-top:12px;"><label>Zielordner (optional, wird angelegt falls nötig)</label>
-            <input type="text" id="cfg-folder-path" placeholder="docker-backups" value="${cfg.folder_path || ""}" /></div>`;
+          // ── Device Code Flow logic ──
+          let devicePollInterval = null;
+          const stopPolling = () => { if (devicePollInterval) { clearInterval(devicePollInterval); devicePollInterval = null; } };
 
-        // Step navigation
-        const showPanel = (n) => {
-          fieldsEl.querySelectorAll(".wizard-panel").forEach((p) => p.classList.toggle("hidden", p.dataset.panel != n));
-          fieldsEl.querySelectorAll(".wizard-step").forEach((s) => {
-            s.classList.toggle("active", s.dataset.step == n);
-            s.classList.toggle("done", s.dataset.step < n);
+          fieldsEl.querySelector("#device-start-btn").addEventListener("click", async () => {
+            const startArea = fieldsEl.querySelector("#device-start-area");
+            const codePanel = fieldsEl.querySelector("#device-code-panel");
+            const statusEl = fieldsEl.querySelector("#device-status");
+            startArea.querySelector("#device-start-btn").disabled = true;
+            startArea.querySelector("#device-start-btn").textContent = "Starte…";
+            try {
+              const res = await api("/api/settings/oauth/onedrive/device-start", { method: "POST", body: "{}" });
+              startArea.classList.add("hidden");
+              codePanel.classList.remove("hidden");
+              fieldsEl.querySelector("#device-user-code").textContent = res.user_code;
+              const link = fieldsEl.querySelector("#device-verify-link");
+              link.href = res.verification_uri;
+              link.textContent = res.verification_uri.replace("https://", "");
+
+              devicePollInterval = setInterval(async () => {
+                try {
+                  const poll = await api(`/api/settings/oauth/onedrive/device-poll?key=${encodeURIComponent(res.key)}`);
+                  if (poll.status === "ready") {
+                    stopPolling();
+                    oauthPending = { provider: "onedrive", state: poll.state };
+                    statusEl.innerHTML = `<span style="color:#2d7a46;font-weight:600">✅ Angemeldet! Jetzt Speichern klicken.</span>`;
+                    fieldsEl.querySelector("#device-cancel-btn").remove();
+                  } else if (poll.status === "expired") {
+                    stopPolling();
+                    statusEl.innerHTML = `<span style="color:var(--danger)">Code abgelaufen. <button type="button" class="btn" id="retry-btn" style="font-size:.82rem;padding:2px 10px;">Erneut versuchen</button></span>`;
+                    fieldsEl.querySelector("#retry-btn")?.addEventListener("click", () => { stopPolling(); codePanel.classList.add("hidden"); startArea.classList.remove("hidden"); startArea.querySelector("#device-start-btn").disabled = false; startArea.querySelector("#device-start-btn").textContent = "Mit Microsoft anmelden"; });
+                  } else if (poll.status === "error") {
+                    stopPolling();
+                    statusEl.innerHTML = `<span style="color:var(--danger)">Fehler: ${escHtml(poll.detail || "unbekannt")}</span>`;
+                  }
+                } catch (_) {}
+              }, (res.interval || 5) * 1000);
+
+            } catch (e) {
+              startArea.querySelector("#device-start-btn").disabled = false;
+              startArea.querySelector("#device-start-btn").textContent = "Mit Microsoft anmelden";
+              toast(`Fehler: ${e.message}`, "error");
+            }
           });
-        };
-        fieldsEl.querySelectorAll(".wizard-next").forEach((btn) =>
-          btn.addEventListener("click", () => showPanel(btn.dataset.next)));
-        fieldsEl.querySelectorAll(".wizard-back").forEach((btn) =>
-          btn.addEventListener("click", () => showPanel(btn.dataset.back)));
 
-        const copyBtn = fieldsEl.querySelector(".wizard-copy-btn");
-        if (copyBtn) copyBtn.addEventListener("click", () => {
-          navigator.clipboard.writeText(fieldsEl.querySelector("#wizard-redirect-uri").textContent).catch(() => {});
-          copyBtn.textContent = "✓";
-          setTimeout(() => { copyBtn.textContent = "📋"; }, 1500);
-        });
+          fieldsEl.querySelector("#device-copy-btn").addEventListener("click", () => {
+            navigator.clipboard.writeText(fieldsEl.querySelector("#device-user-code").textContent).catch(() => {});
+          });
 
-        const saveUrlBtn = fieldsEl.querySelector("#wizard-save-url-btn");
-        if (saveUrlBtn) saveUrlBtn.addEventListener("click", async () => {
-          const urlInput = fieldsEl.querySelector("#wizard-public-url");
-          const urlResult = fieldsEl.querySelector("#wizard-url-result");
-          const url = urlInput.value.trim().replace(/\/$/, "");
-          if (!url) { urlResult.innerHTML = '<span style="color:var(--danger)">Bitte eine Adresse eingeben.</span>'; return; }
-          saveUrlBtn.disabled = true;
-          try {
-            await api("/api/settings/public-url", { method: "PUT", body: JSON.stringify({ url }) });
-            const redirectUri = `${url}/api/settings/oauth/${provider}/callback`;
-            fieldsEl.querySelector("#wizard-redirect-uri").textContent = redirectUri;
-            if (copyBtn) { copyBtn.disabled = false; }
-            urlResult.innerHTML = '<span style="color:#2d7a46">✓ Gespeichert</span>';
-            urlInput.closest(".wizard-warning").style.border = "1px solid #2d7a46";
-          } catch (e) {
-            urlResult.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message)}</span>`;
-          } finally { saveUrlBtn.disabled = false; }
-        });
+          fieldsEl.querySelector("#device-cancel-btn").addEventListener("click", () => {
+            stopPolling();
+            fieldsEl.querySelector("#device-code-panel").classList.add("hidden");
+            fieldsEl.querySelector("#device-start-area").classList.remove("hidden");
+            fieldsEl.querySelector("#device-start-btn").disabled = false;
+            fieldsEl.querySelector("#device-start-btn").textContent = "Mit Microsoft anmelden";
+          });
 
-        fieldsEl.querySelector("#wizard-save-btn").addEventListener("click", async () => {
-          const btn = fieldsEl.querySelector("#wizard-save-btn");
-          const result = fieldsEl.querySelector("#wizard-save-result");
-          const clientId = fieldsEl.querySelector("#wizard-client-id").value.trim();
-          const clientSecret = fieldsEl.querySelector("#wizard-client-secret").value.trim();
-          if (!clientId || !clientSecret) { result.innerHTML = '<span class="badge failed">Client-ID und Secret müssen ausgefüllt sein.</span>'; return; }
-          btn.disabled = true;
-          result.innerHTML = '<span class="muted">Speichere …</span>';
-          try {
-            await api(`/api/settings/oauth-apps/${provider}`, {
-              method: "PUT", body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+          // ── Azure wizard logic (scoped to #azure-wizard-inner) ──
+          const azEl = fieldsEl.querySelector("#azure-wizard-inner");
+          const showPanel = (n) => {
+            azEl.querySelectorAll(".wizard-panel").forEach((p) => p.classList.toggle("hidden", p.dataset.panel != n));
+            azEl.querySelectorAll(".wizard-step").forEach((s) => {
+              s.classList.toggle("active", s.dataset.step == n);
+              s.classList.toggle("done", s.dataset.step < n);
             });
-            showPanel(4);
-          } catch (e) {
-            result.innerHTML = `<span class="badge failed">${escHtml(e.message)}</span>`;
-          } finally { btn.disabled = false; }
-        });
+          };
+          azEl.querySelectorAll(".az-next").forEach((btn) => btn.addEventListener("click", () => showPanel(btn.dataset.next)));
+          azEl.querySelectorAll(".az-back").forEach((btn) => btn.addEventListener("click", () => showPanel(btn.dataset.back)));
+
+          const copyBtn = azEl.querySelector(".wizard-copy-btn");
+          if (copyBtn) copyBtn.addEventListener("click", () => {
+            navigator.clipboard.writeText(azEl.querySelector("#wizard-redirect-uri").textContent).catch(() => {});
+            copyBtn.textContent = "✓"; setTimeout(() => { copyBtn.textContent = "📋"; }, 1500);
+          });
+
+          const saveUrlBtn = azEl.querySelector("#wizard-save-url-btn");
+          if (saveUrlBtn) saveUrlBtn.addEventListener("click", async () => {
+            const urlInput = azEl.querySelector("#wizard-public-url");
+            const urlResult = azEl.querySelector("#wizard-url-result");
+            const url = urlInput.value.trim().replace(/\/$/, "");
+            if (!url) { urlResult.innerHTML = '<span style="color:var(--danger)">Bitte eine Adresse eingeben.</span>'; return; }
+            saveUrlBtn.disabled = true;
+            try {
+              await api("/api/settings/public-url", { method: "PUT", body: JSON.stringify({ url }) });
+              const redirectUri = `${url}/api/settings/oauth/onedrive/callback`;
+              azEl.querySelector("#wizard-redirect-uri").textContent = redirectUri;
+              if (copyBtn) copyBtn.disabled = false;
+              urlResult.innerHTML = '<span style="color:#2d7a46">✓ Gespeichert</span>';
+            } catch (e) {
+              urlResult.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message)}</span>`;
+            } finally { saveUrlBtn.disabled = false; }
+          });
+
+          azEl.querySelector("#wizard-save-btn").addEventListener("click", async () => {
+            const btn = azEl.querySelector("#wizard-save-btn");
+            const result = azEl.querySelector("#wizard-save-result");
+            const clientId = azEl.querySelector("#wizard-client-id").value.trim();
+            const clientSecret = azEl.querySelector("#wizard-client-secret").value.trim();
+            if (!clientId || !clientSecret) { result.innerHTML = '<span class="badge failed">Client-ID und Secret müssen ausgefüllt sein.</span>'; return; }
+            btn.disabled = true;
+            result.innerHTML = '<span class="muted">Speichere …</span>';
+            try {
+              await api("/api/settings/oauth-apps/onedrive", { method: "PUT", body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }) });
+              showPanel(4);
+            } catch (e) {
+              result.innerHTML = `<span class="badge failed">${escHtml(e.message)}</span>`;
+            } finally { btn.disabled = false; }
+          });
+
+        } else {
+          // ── Google Drive: existing 4-step wizard (unchanged) ──
+          fieldsEl.innerHTML = `
+            <div class="oauth-wizard">
+              <div class="wizard-steps">
+                <div class="wizard-step active" data-step="1"><div class="step-num">1</div><div class="step-label">OAuth-Client anlegen</div></div>
+                <div class="wizard-step" data-step="2"><div class="step-num">2</div><div class="step-label">Redirect-URI eintragen</div></div>
+                <div class="wizard-step" data-step="3"><div class="step-num">3</div><div class="step-label">Client-ID &amp; Secret eingeben</div></div>
+                <div class="wizard-step" data-step="4"><div class="step-num">4</div><div class="step-label">Anmelden</div></div>
+              </div>
+              <div class="wizard-panel" data-panel="1">
+                <div class="wizard-warning" style="margin-bottom:10px;">
+                  ⚠️ <strong>Google erlaubt keine privaten IP-Adressen</strong> (10.x, 192.168.x) als Redirect-URI.<br>
+                  Als DBM-Adresse muss daher <strong>eine dieser Optionen</strong> funktionieren:<br>
+                  <ul style="margin:6px 0 0; padding-left:18px;">
+                    <li><code>http://localhost:8420</code> – nur wenn Browser und DBM auf <em>demselben</em> Rechner laufen</li>
+                    <li>Ein lokaler Hostname, z.B. <code>http://dbm.home:8420</code> – eingetragen in lokaler DNS oder <code>/etc/hosts</code></li>
+                    <li>Ein echter Domain-Name mit Reverse Proxy</li>
+                  </ul>
+                  <strong>Einfachste Alternative:</strong> Google Drive über <strong>rclone</strong> einbinden – kein eigenes OAuth nötig (Speicherziel-Typ „rclone").
+                </div>
+                <p>Du brauchst einen <strong>Google OAuth-Client</strong> in der Google Cloud Console.</p>
+                <ol>
+                  <li>Öffne die <a href="${googleUrl}" target="_blank" rel="noopener">Google Cloud Console → OAuth-Client-ID erstellen</a></li>
+                  <li>Anwendungstyp: <strong>Webanwendung</strong></li>
+                  <li>Gib einen beliebigen Namen ein, z.B. <code>Docker Backup Manager</code></li>
+                  <li>Autorisierte Redirect-URIs: kommt im nächsten Schritt</li>
+                </ol>
+                <button type="button" class="btn primary wizard-next" data-next="2">Weiter →</button>
+              </div>
+              <div class="wizard-panel hidden" data-panel="2">
+                ${!appCfg || !appCfg.public_url_set ? `
+                <div class="wizard-warning" style="margin-bottom:12px;">
+                  <strong>Zuerst: Deine DBM-Adresse eintragen</strong>
+                  <div style="display:flex; gap:8px; margin-top:8px; align-items:center; flex-wrap:wrap;">
+                    <input type="text" id="wizard-public-url" placeholder="http://192.168.1.10:8420" style="flex:1; min-width:200px;" />
+                    <button type="button" class="btn" id="wizard-save-url-btn">Speichern</button>
+                  </div>
+                  <div id="wizard-url-result" style="margin-top:4px; font-size:.82rem;"></div>
+                </div>` : ""}
+                <p>Trage diese <strong>Redirect-URI</strong> in die Google Cloud Console ein:</p>
+                <div class="wizard-uri-box">
+                  <code id="wizard-redirect-uri">${redirectPlaceholder}</code>
+                  <button type="button" class="btn wizard-copy-btn" title="Kopieren" ${!appCfg || !appCfg.redirect_uri ? "disabled" : ""}>📋</button>
+                </div>
+                <div style="display:flex; gap:8px;">
+                  <button type="button" class="btn wizard-back" data-back="1">← Zurück</button>
+                  <button type="button" class="btn primary wizard-next" data-next="3">Weiter →</button>
+                </div>
+              </div>
+              <div class="wizard-panel hidden" data-panel="3">
+                <p>Trage jetzt die Zugangsdaten aus Google Cloud ein:</p>
+                <div class="field"><label>Client-ID</label>
+                  <input type="text" id="wizard-client-id" placeholder="xxxxx.apps.googleusercontent.com" autocomplete="off" /></div>
+                <div class="field"><label>Clientschlüssel</label>
+                  <input type="password" id="wizard-client-secret" autocomplete="off" /></div>
+                <div id="wizard-save-result"></div>
+                <div style="display:flex; gap:8px;">
+                  <button type="button" class="btn wizard-back" data-back="2">← Zurück</button>
+                  <button type="button" class="btn primary" id="wizard-save-btn">Speichern &amp; weiter →</button>
+                </div>
+              </div>
+              <div class="wizard-panel hidden" data-panel="4">
+                <p>✅ Zugangsdaten gespeichert. Klicke jetzt auf <strong>Anmelden</strong>.</p>
+                <button type="button" class="btn primary" id="oauth-connect-btn">Mit Google Drive anmelden</button>
+              </div>
+            </div>
+            <div class="field" style="margin-top:12px;"><label>Zielordner (optional, wird angelegt falls nötig)</label>
+              <input type="text" id="cfg-folder-path" placeholder="docker-backups" value="${cfg.folder_path || ""}" /></div>`;
+
+          const showPanel = (n) => {
+            fieldsEl.querySelectorAll(".wizard-panel").forEach((p) => p.classList.toggle("hidden", p.dataset.panel != n));
+            fieldsEl.querySelectorAll(".wizard-step").forEach((s) => {
+              s.classList.toggle("active", s.dataset.step == n);
+              s.classList.toggle("done", s.dataset.step < n);
+            });
+          };
+          fieldsEl.querySelectorAll(".wizard-next").forEach((btn) => btn.addEventListener("click", () => showPanel(btn.dataset.next)));
+          fieldsEl.querySelectorAll(".wizard-back").forEach((btn) => btn.addEventListener("click", () => showPanel(btn.dataset.back)));
+
+          const copyBtn = fieldsEl.querySelector(".wizard-copy-btn");
+          if (copyBtn) copyBtn.addEventListener("click", () => {
+            navigator.clipboard.writeText(fieldsEl.querySelector("#wizard-redirect-uri").textContent).catch(() => {});
+            copyBtn.textContent = "✓"; setTimeout(() => { copyBtn.textContent = "📋"; }, 1500);
+          });
+
+          const saveUrlBtn = fieldsEl.querySelector("#wizard-save-url-btn");
+          if (saveUrlBtn) saveUrlBtn.addEventListener("click", async () => {
+            const urlInput = fieldsEl.querySelector("#wizard-public-url");
+            const urlResult = fieldsEl.querySelector("#wizard-url-result");
+            const url = urlInput.value.trim().replace(/\/$/, "");
+            if (!url) { urlResult.innerHTML = '<span style="color:var(--danger)">Bitte eine Adresse eingeben.</span>'; return; }
+            saveUrlBtn.disabled = true;
+            try {
+              await api("/api/settings/public-url", { method: "PUT", body: JSON.stringify({ url }) });
+              const redirectUri = `${url}/api/settings/oauth/google/callback`;
+              fieldsEl.querySelector("#wizard-redirect-uri").textContent = redirectUri;
+              if (copyBtn) copyBtn.disabled = false;
+              urlResult.innerHTML = '<span style="color:#2d7a46">✓ Gespeichert</span>';
+              urlInput.closest(".wizard-warning").style.border = "1px solid #2d7a46";
+            } catch (e) {
+              urlResult.innerHTML = `<span style="color:var(--danger)">${escHtml(e.message)}</span>`;
+            } finally { saveUrlBtn.disabled = false; }
+          });
+
+          fieldsEl.querySelector("#wizard-save-btn").addEventListener("click", async () => {
+            const btn = fieldsEl.querySelector("#wizard-save-btn");
+            const result = fieldsEl.querySelector("#wizard-save-result");
+            const clientId = fieldsEl.querySelector("#wizard-client-id").value.trim();
+            const clientSecret = fieldsEl.querySelector("#wizard-client-secret").value.trim();
+            if (!clientId || !clientSecret) { result.innerHTML = '<span class="badge failed">Client-ID und Secret müssen ausgefüllt sein.</span>'; return; }
+            btn.disabled = true;
+            result.innerHTML = '<span class="muted">Speichere …</span>';
+            try {
+              await api("/api/settings/oauth-apps/google", { method: "PUT", body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }) });
+              showPanel(4);
+            } catch (e) {
+              result.innerHTML = `<span class="badge failed">${escHtml(e.message)}</span>`;
+            } finally { btn.disabled = false; }
+          });
+        }
       } else {
         // ── Credentials already configured: show normal connect button ──
         fieldsEl.innerHTML = `
@@ -2175,128 +2334,9 @@ async function openStorageTargetModal(existing) {
       });
     } else {
       fieldsEl.innerHTML = `
-        <div class="field"><label>rclone Remote-Name (aus rclone.conf)</label><input type="text" id="cfg-remote" placeholder="gdrive" value="${cfg.remote || ""}" /></div>
+        <div class="field"><label>rclone Remote-Name (aus rclone.conf)</label><input type="text" id="cfg-remote" placeholder="mein-sftp" value="${cfg.remote || ""}" /></div>
         <div class="field"><label>Remote-Pfad</label><input type="text" id="cfg-remote-path" placeholder="docker-backups" value="${cfg.remote_path || ""}" /></div>
-        <div class="rclone-wizard-wrap" id="rclone-wizard-wrap">
-          <button type="button" class="btn" id="rclone-wizard-toggle" style="margin-bottom:8px;">▶ Quick-Setup Assistent (Google Drive / OneDrive)</button>
-          <div id="rclone-wizard" class="hidden">
-            <div class="oauth-wizard">
-              <div class="wizard-steps">
-                <div class="wizard-step active" data-step="1"><div class="step-num">1</div><div class="step-label">Provider</div></div>
-                <div class="wizard-step" data-step="2"><div class="step-num">2</div><div class="step-label">Befehl ausführen</div></div>
-                <div class="wizard-step" data-step="3"><div class="step-num">3</div><div class="step-label">Token einfügen</div></div>
-                <div class="wizard-step" data-step="4"><div class="step-num">4</div><div class="step-label">Fertig</div></div>
-              </div>
-              <div class="wizard-panel" data-panel="1">
-                <p style="margin:0 0 10px">Wähle den Cloud-Dienst, den du mit rclone einrichten möchtest:</p>
-                <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:12px;">
-                  <label style="display:flex; align-items:center; gap:8px; cursor:pointer;"><input type="radio" name="rclone-provider" value="google" checked /> Google Drive</label>
-                  <label style="display:flex; align-items:center; gap:8px; cursor:pointer;"><input type="radio" name="rclone-provider" value="onedrive_personal" /> OneDrive Personal</label>
-                  <label style="display:flex; align-items:center; gap:8px; cursor:pointer;"><input type="radio" name="rclone-provider" value="onedrive_business" /> OneDrive Business / Schule</label>
-                </div>
-                <div style="display:flex; gap:8px;">
-                  <button type="button" class="btn primary rclone-wizard-next" data-next="2">Weiter →</button>
-                </div>
-              </div>
-              <div class="wizard-panel hidden" data-panel="2">
-                <p style="margin:0 0 8px">Führe diesen Befehl <strong>einmalig auf einem Rechner mit Browser</strong> aus (z.B. deinem Laptop – Docker reicht):</p>
-                <div class="wizard-uri-box" style="margin-bottom:8px;">
-                  <code id="rclone-auth-cmd">docker run --rm -it rclone/rclone authorize "drive"</code>
-                  <button type="button" class="btn" id="rclone-cmd-copy">📋</button>
-                </div>
-                <p class="muted" style="font-size:.82rem; margin:0 0 12px">Der Befehl öffnet deinen Browser zur Anmeldung. Danach erscheint ein JSON-Token in der Konsole – dieses kopieren.</p>
-                <div class="wizard-warning" style="margin-bottom:12px;">
-                  <strong>Kein Docker?</strong> Lade <a href="https://rclone.org/downloads/" target="_blank" rel="noopener">rclone direkt herunter</a> und führe stattdessen <code>rclone authorize "drive"</code> aus.
-                </div>
-                <div style="display:flex; gap:8px;">
-                  <button type="button" class="btn rclone-wizard-back" data-back="1">← Zurück</button>
-                  <button type="button" class="btn primary rclone-wizard-next" data-next="3">Weiter →</button>
-                </div>
-              </div>
-              <div class="wizard-panel hidden" data-panel="3">
-                <p style="margin:0 0 8px">Füge die Ausgabe des Befehls (das JSON-Token) hier ein:</p>
-                <textarea id="rclone-token-input" rows="5" style="width:100%; font-family:monospace; font-size:.82rem; resize:vertical;" placeholder='{"access_token":"...","token_type":"Bearer","refresh_token":"...","expiry":"..."}'></textarea>
-                <div class="field" style="margin-top:8px; margin-bottom:8px;">
-                  <label>Remote-Name (frei wählbar)</label>
-                  <input type="text" id="rclone-wizard-remote-name" placeholder="gdrive" />
-                </div>
-                <div id="rclone-wizard-result" style="margin:4px 0;"></div>
-                <div style="display:flex; gap:8px;">
-                  <button type="button" class="btn rclone-wizard-back" data-back="2">← Zurück</button>
-                  <button type="button" class="btn primary" id="rclone-wizard-create-btn">Config erstellen →</button>
-                </div>
-              </div>
-              <div class="wizard-panel hidden" data-panel="4">
-                <p style="margin:0;">✅ <strong>Fertig!</strong> Remote <strong id="rclone-done-name"></strong> wurde in <code>/data/rclone.conf</code> eingetragen. Der Remote-Name oben wurde automatisch ausgefüllt.</p>
-              </div>
-            </div>
-          </div>
-        </div>
-        <p class="muted" style="font-size:.8rem">Der Remote muss in der gemounteten <code>/data/rclone.conf</code> eingetragen sein (unterstützt SFTP, WebDAV, B2, Backblaze u.v.m.). Für Google Drive und OneDrive hilft der Quick-Setup Assistent oben.</p>`;
-
-      // ── Wizard logic ──
-      const rcWrap = fieldsEl.querySelector("#rclone-wizard");
-      const rcToggle = fieldsEl.querySelector("#rclone-wizard-toggle");
-      rcToggle.addEventListener("click", () => {
-        const hidden = rcWrap.classList.toggle("hidden");
-        rcToggle.textContent = (hidden ? "▶" : "▼") + " Quick-Setup Assistent (Google Drive / OneDrive)";
-      });
-
-      function rcShowPanel(n) {
-        fieldsEl.querySelectorAll("#rclone-wizard .wizard-panel").forEach(p => p.classList.toggle("hidden", p.dataset.panel != n));
-        fieldsEl.querySelectorAll("#rclone-wizard .wizard-step").forEach(s => {
-          s.classList.toggle("active", s.dataset.step == n);
-          s.classList.toggle("done", s.dataset.step < n);
-        });
-      }
-
-      // Update command when provider changes
-      function updateRcloneCmd() {
-        const prov = fieldsEl.querySelector("input[name='rclone-provider']:checked")?.value || "google";
-        const type = prov === "google" ? "drive" : "onedrive";
-        fieldsEl.querySelector("#rclone-auth-cmd").textContent = `docker run --rm -it rclone/rclone authorize "${type}"`;
-        // Suggest remote name
-        const nameInput = fieldsEl.querySelector("#rclone-wizard-remote-name");
-        if (nameInput && !nameInput.value) nameInput.placeholder = prov === "google" ? "gdrive" : "onedrive";
-      }
-      fieldsEl.querySelectorAll("input[name='rclone-provider']").forEach(r => r.addEventListener("change", updateRcloneCmd));
-
-      fieldsEl.querySelectorAll(".rclone-wizard-next").forEach(btn =>
-        btn.addEventListener("click", () => { updateRcloneCmd(); rcShowPanel(btn.dataset.next); }));
-      fieldsEl.querySelectorAll(".rclone-wizard-back").forEach(btn =>
-        btn.addEventListener("click", () => rcShowPanel(btn.dataset.back)));
-
-      fieldsEl.querySelector("#rclone-cmd-copy").addEventListener("click", () => {
-        navigator.clipboard.writeText(fieldsEl.querySelector("#rclone-auth-cmd").textContent).catch(() => {});
-      });
-
-      fieldsEl.querySelector("#rclone-wizard-create-btn").addEventListener("click", async () => {
-        const btn = fieldsEl.querySelector("#rclone-wizard-create-btn");
-        const result = fieldsEl.querySelector("#rclone-wizard-result");
-        const provider = fieldsEl.querySelector("input[name='rclone-provider']:checked")?.value || "google";
-        const tokenJson = fieldsEl.querySelector("#rclone-token-input").value.trim();
-        const remoteName = fieldsEl.querySelector("#rclone-wizard-remote-name").value.trim() ||
-                           (provider === "google" ? "gdrive" : "onedrive");
-        result.innerHTML = "";
-        btn.disabled = true;
-        btn.textContent = "Erstelle...";
-        try {
-          const res = await api("/api/settings/rclone/quick-setup", {
-            method: "POST",
-            body: JSON.stringify({ provider, token_json: tokenJson, remote_name: remoteName }),
-          });
-          // Fill in the remote name field
-          const remoteInput = fieldsEl.querySelector("#cfg-remote");
-          if (remoteInput) remoteInput.value = res.remote_name;
-          fieldsEl.querySelector("#rclone-done-name").textContent = res.remote_name;
-          rcShowPanel(4);
-        } catch (e) {
-          result.innerHTML = `<span class="badge failed">${escHtml(e.message)}</span>`;
-        } finally {
-          btn.disabled = false;
-          btn.textContent = "Config erstellen →";
-        }
-      });
+        <p class="muted" style="font-size:.8rem">Für SFTP, WebDAV, Backblaze B2 und andere Dienste. Den Remote einmalig per <code>rclone config</code> in der gemounteten <code>/data/rclone.conf</code> anlegen, danach hier den Namen eintragen. Für Google Drive und OneDrive die eigenen Optionen oben verwenden.</p>`;
     }
   }
   if (existing) {

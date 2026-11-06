@@ -45,8 +45,16 @@ MS_AUTH_URL = f"https://login.microsoftonline.com/{MS_TENANT}/oauth2/v2.0/author
 MS_TOKEN_URL = f"https://login.microsoftonline.com/{MS_TENANT}/oauth2/v2.0/token"
 MS_SCOPE = "offline_access Files.ReadWrite User.Read"
 
+# Device Code Flow for OneDrive (no Azure app registration needed).
+# Uses rclone's pre-registered public client — same client ID rclone uses for OneDrive.
+# Public clients don't need a client_secret for device flow.
+_MS_DEVICE_CLIENT_ID = "b15665d9-eda6-4092-8539-0eec376afd59"
+_MS_DEVICE_CODE_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
+_MS_DEVICE_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+
 _PENDING_TTL_SECONDS = 15 * 60
 _pending: dict[str, dict] = {}  # state -> {provider, refresh_token, account, created_at}
+_device_sessions: dict[str, dict] = {}  # key -> {device_code, interval, expires_at, state_or_none}
 
 
 def _get_credentials(provider: str) -> tuple[str, str]:
@@ -400,3 +408,93 @@ def sync_onedrive(backup_path: Path, config: dict) -> None:
                 )
                 resp.raise_for_status()
                 offset += len(chunk)
+
+
+# ── OneDrive Device Code Flow (no Azure app registration needed) ────────────
+
+def device_flow_start() -> dict:
+    """Request a device code from Microsoft and return display info.
+
+    Returns a dict with: key, user_code, verification_uri, expires_in, interval.
+    The 'key' is an opaque token the caller uses to poll device_flow_poll().
+    """
+    resp = requests.post(_MS_DEVICE_CODE_URL, data={
+        "client_id": _MS_DEVICE_CLIENT_ID,
+        "scope": MS_SCOPE,
+    }, timeout=30)
+    resp.raise_for_status()
+    data = resp.json()
+
+    key = secrets.token_urlsafe(24)
+    _device_sessions[key] = {
+        "device_code": data["device_code"],
+        "interval": int(data.get("interval", 5)),
+        "expires_at": time.time() + int(data.get("expires_in", 900)),
+        "state": None,  # filled once token is received
+        "last_poll": 0.0,
+    }
+    return {
+        "key": key,
+        "user_code": data["user_code"],
+        "verification_uri": data.get("verification_uri", "https://microsoft.com/devicelogin"),
+        "expires_in": int(data.get("expires_in", 900)),
+        "interval": int(data.get("interval", 5)),
+    }
+
+
+def device_flow_poll(key: str) -> dict:
+    """Poll Microsoft for the token.  Returns one of:
+      {status: "pending"}              – user has not signed in yet
+      {status: "ready", state: "..."}  – signed in; use state with pop_pending()
+      {status: "expired"}              – code expired or session unknown
+      {status: "error", detail: "..."}
+    """
+    session = _device_sessions.get(key)
+    if not session:
+        return {"status": "expired"}
+    if time.time() > session["expires_at"]:
+        _device_sessions.pop(key, None)
+        return {"status": "expired"}
+
+    # Already have a token from a previous poll
+    if session["state"]:
+        return {"status": "ready", "state": session["state"]}
+
+    # Respect minimum poll interval
+    if time.time() - session["last_poll"] < session["interval"]:
+        return {"status": "pending"}
+    session["last_poll"] = time.time()
+
+    try:
+        resp = requests.post(_MS_DEVICE_TOKEN_URL, data={
+            "client_id": _MS_DEVICE_CLIENT_ID,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": session["device_code"],
+        }, timeout=30)
+        data = resp.json()
+    except Exception as exc:
+        return {"status": "error", "detail": str(exc)}
+
+    err = data.get("error", "")
+    if err == "authorization_pending" or err == "slow_down":
+        if err == "slow_down":
+            session["interval"] = min(session["interval"] + 5, 30)
+        return {"status": "pending"}
+    if err:
+        _device_sessions.pop(key, None)
+        return {"status": "error", "detail": data.get("error_description", err)}
+
+    refresh_token = data.get("refresh_token")
+    if not refresh_token:
+        return {"status": "error", "detail": "Kein refresh_token erhalten"}
+
+    account = _onedrive_account_email(data["access_token"])
+    state = secrets.token_urlsafe(24)
+    _pending[state] = {
+        "provider": "onedrive",
+        "refresh_token": refresh_token,
+        "account": account,
+        "created_at": time.time(),
+    }
+    session["state"] = state
+    return {"status": "ready", "state": state}

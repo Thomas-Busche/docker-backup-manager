@@ -680,54 +680,16 @@ def import_config(payload: ImportConfigPayload, db: Session = Depends(get_db),
     return imported
 
 
-# ── rclone Quick-Setup ──────────────────────────────────────────────────────
+# ── OneDrive Device Code Flow endpoints ────────────────────────────────────
 
-class RcloneQuickSetupPayload(BaseModel):
-    provider: str   # "google" | "onedrive_personal" | "onedrive_business"
-    token_json: str
-    remote_name: str = ""
-
-
-def _write_rclone_section(conf_path: Path, remote_name: str, section_lines: list) -> None:
-    """Add or replace a named section in an rclone.conf file."""
-    import re
-    existing = conf_path.read_text(encoding="utf-8") if conf_path.exists() else ""
-    # Remove existing section with the same name (section header + all lines until next header)
-    pattern = re.compile(
-        r"^\[" + re.escape(remote_name) + r"\][^\[]*",
-        re.MULTILINE | re.DOTALL,
-    )
-    cleaned = pattern.sub("", existing).strip()
-    new_section = "[" + remote_name + "]\n" + "\n".join(section_lines) + "\n"
-    new_content = (cleaned + "\n\n" + new_section) if cleaned else new_section
-    conf_path.parent.mkdir(parents=True, exist_ok=True)
-    conf_path.write_text(new_content, encoding="utf-8")
-
-
-@router.post("/rclone/quick-setup")
-def rclone_quick_setup(payload: RcloneQuickSetupPayload, user: User = Depends(get_admin_user)):
-    token_str = payload.token_json.strip()
+@router.post("/oauth/onedrive/device-start")
+def onedrive_device_start(user: User = Depends(get_admin_user)):
     try:
-        token_data = json.loads(token_str)
-    except (json.JSONDecodeError, ValueError):
-        raise HTTPException(422, "Ungültiges Token-Format – kein gültiges JSON")
-    if "access_token" not in token_data:
-        raise HTTPException(422, "Ungültiges Token – 'access_token' fehlt")
+        return oauth_storage.device_flow_start()
+    except Exception as exc:
+        raise HTTPException(502, f"Microsoft hat die Anfrage abgelehnt: {exc}")
 
-    remote_name = (payload.remote_name.strip() or
-                   ("gdrive" if payload.provider == "google" else "onedrive"))
 
-    if payload.provider == "google":
-        section_lines = ["type = drive", "scope = drive", f"token = {token_str}"]
-    elif payload.provider == "onedrive_personal":
-        section_lines = ["type = onedrive", "drive_type = personal", f"token = {token_str}"]
-    elif payload.provider == "onedrive_business":
-        section_lines = ["type = onedrive", "drive_type = business", f"token = {token_str}"]
-    else:
-        raise HTTPException(422, f"Unbekannter Provider: {payload.provider}")
-
-    from app.storage_sync import RCLONE_CONFIG_PATH
-    conf_path = Path(RCLONE_CONFIG_PATH)
-    _write_rclone_section(conf_path, remote_name, section_lines)
-
-    return {"remote_name": remote_name}
+@router.get("/oauth/onedrive/device-poll")
+def onedrive_device_poll(key: str, user: User = Depends(get_admin_user)):
+    return oauth_storage.device_flow_poll(key)
