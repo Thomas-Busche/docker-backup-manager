@@ -687,7 +687,13 @@ def onedrive_device_start(user: User = Depends(get_admin_user)):
     try:
         return oauth_storage.device_flow_start()
     except Exception as exc:
-        raise HTTPException(502, f"Microsoft hat die Anfrage abgelehnt: {exc}")
+        msg = str(exc)
+        if "401" in msg or "400" in msg:
+            msg = (
+                "Microsoft hat die Anmeldung abgelehnt. Bitte verwende die "
+                "Azure-App-Option unten oder wende dich an den Entwickler."
+            )
+        raise HTTPException(502, msg)
 
 
 @router.get("/oauth/onedrive/device-poll")

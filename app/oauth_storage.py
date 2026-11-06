@@ -45,10 +45,11 @@ MS_AUTH_URL = f"https://login.microsoftonline.com/{MS_TENANT}/oauth2/v2.0/author
 MS_TOKEN_URL = f"https://login.microsoftonline.com/{MS_TENANT}/oauth2/v2.0/token"
 MS_SCOPE = "offline_access Files.ReadWrite User.Read"
 
-# Device Code Flow for OneDrive (no Azure app registration needed).
-# Uses rclone's pre-registered public client — same client ID rclone uses for OneDrive.
-# Public clients don't need a client_secret for device flow.
-_MS_DEVICE_CLIENT_ID = "b15665d9-eda6-4092-8539-0eec376afd59"
+# Device Code Flow for OneDrive (no Azure app registration needed by the user).
+# Microsoft Graph tutorial / SDK sample client — a genuine public client
+# (allowPublicClient=true, no client_secret required) designed for device flow + Graph API.
+# Users see a standard Microsoft consent screen for the requested scopes.
+_MS_DEVICE_CLIENT_ID = "14d82eec-204b-4c2f-b7e8-296a70dab67e"
 _MS_DEVICE_CODE_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/devicecode"
 _MS_DEVICE_TOKEN_URL = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
 
