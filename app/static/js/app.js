@@ -2177,7 +2177,126 @@ async function openStorageTargetModal(existing) {
       fieldsEl.innerHTML = `
         <div class="field"><label>rclone Remote-Name (aus rclone.conf)</label><input type="text" id="cfg-remote" placeholder="gdrive" value="${cfg.remote || ""}" /></div>
         <div class="field"><label>Remote-Pfad</label><input type="text" id="cfg-remote-path" placeholder="docker-backups" value="${cfg.remote_path || ""}" /></div>
-        <p class="muted" style="font-size:.8rem">Der Remote muss vorher per <span class="mono">rclone config</span> in der gemounteten rclone.conf eingerichtet sein (unterstützt SFTP, WebDAV, B2, u.v.m. - für Google Drive/OneDrive die eigenen Optionen oben verwenden).</p>`;
+        <div class="rclone-wizard-wrap" id="rclone-wizard-wrap">
+          <button type="button" class="btn" id="rclone-wizard-toggle" style="margin-bottom:8px;">▶ Quick-Setup Assistent (Google Drive / OneDrive)</button>
+          <div id="rclone-wizard" class="hidden">
+            <div class="oauth-wizard">
+              <div class="wizard-steps">
+                <div class="wizard-step active" data-step="1"><div class="step-num">1</div><div class="step-label">Provider</div></div>
+                <div class="wizard-step" data-step="2"><div class="step-num">2</div><div class="step-label">Befehl ausführen</div></div>
+                <div class="wizard-step" data-step="3"><div class="step-num">3</div><div class="step-label">Token einfügen</div></div>
+                <div class="wizard-step" data-step="4"><div class="step-num">4</div><div class="step-label">Fertig</div></div>
+              </div>
+              <div class="wizard-panel" data-panel="1">
+                <p style="margin:0 0 10px">Wähle den Cloud-Dienst, den du mit rclone einrichten möchtest:</p>
+                <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:12px;">
+                  <label style="display:flex; align-items:center; gap:8px; cursor:pointer;"><input type="radio" name="rclone-provider" value="google" checked /> Google Drive</label>
+                  <label style="display:flex; align-items:center; gap:8px; cursor:pointer;"><input type="radio" name="rclone-provider" value="onedrive_personal" /> OneDrive Personal</label>
+                  <label style="display:flex; align-items:center; gap:8px; cursor:pointer;"><input type="radio" name="rclone-provider" value="onedrive_business" /> OneDrive Business / Schule</label>
+                </div>
+                <div style="display:flex; gap:8px;">
+                  <button type="button" class="btn primary rclone-wizard-next" data-next="2">Weiter →</button>
+                </div>
+              </div>
+              <div class="wizard-panel hidden" data-panel="2">
+                <p style="margin:0 0 8px">Führe diesen Befehl <strong>einmalig auf einem Rechner mit Browser</strong> aus (z.B. deinem Laptop – Docker reicht):</p>
+                <div class="wizard-uri-box" style="margin-bottom:8px;">
+                  <code id="rclone-auth-cmd">docker run --rm -it rclone/rclone authorize "drive"</code>
+                  <button type="button" class="btn" id="rclone-cmd-copy">📋</button>
+                </div>
+                <p class="muted" style="font-size:.82rem; margin:0 0 12px">Der Befehl öffnet deinen Browser zur Anmeldung. Danach erscheint ein JSON-Token in der Konsole – dieses kopieren.</p>
+                <div class="wizard-warning" style="margin-bottom:12px;">
+                  <strong>Kein Docker?</strong> Lade <a href="https://rclone.org/downloads/" target="_blank" rel="noopener">rclone direkt herunter</a> und führe stattdessen <code>rclone authorize "drive"</code> aus.
+                </div>
+                <div style="display:flex; gap:8px;">
+                  <button type="button" class="btn rclone-wizard-back" data-back="1">← Zurück</button>
+                  <button type="button" class="btn primary rclone-wizard-next" data-next="3">Weiter →</button>
+                </div>
+              </div>
+              <div class="wizard-panel hidden" data-panel="3">
+                <p style="margin:0 0 8px">Füge die Ausgabe des Befehls (das JSON-Token) hier ein:</p>
+                <textarea id="rclone-token-input" rows="5" style="width:100%; font-family:monospace; font-size:.82rem; resize:vertical;" placeholder='{"access_token":"...","token_type":"Bearer","refresh_token":"...","expiry":"..."}'></textarea>
+                <div class="field" style="margin-top:8px; margin-bottom:8px;">
+                  <label>Remote-Name (frei wählbar)</label>
+                  <input type="text" id="rclone-wizard-remote-name" placeholder="gdrive" />
+                </div>
+                <div id="rclone-wizard-result" style="margin:4px 0;"></div>
+                <div style="display:flex; gap:8px;">
+                  <button type="button" class="btn rclone-wizard-back" data-back="2">← Zurück</button>
+                  <button type="button" class="btn primary" id="rclone-wizard-create-btn">Config erstellen →</button>
+                </div>
+              </div>
+              <div class="wizard-panel hidden" data-panel="4">
+                <p style="margin:0;">✅ <strong>Fertig!</strong> Remote <strong id="rclone-done-name"></strong> wurde in <code>/data/rclone.conf</code> eingetragen. Der Remote-Name oben wurde automatisch ausgefüllt.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="muted" style="font-size:.8rem">Der Remote muss in der gemounteten <code>/data/rclone.conf</code> eingetragen sein (unterstützt SFTP, WebDAV, B2, Backblaze u.v.m.). Für Google Drive und OneDrive hilft der Quick-Setup Assistent oben.</p>`;
+
+      // ── Wizard logic ──
+      const rcWrap = fieldsEl.querySelector("#rclone-wizard");
+      const rcToggle = fieldsEl.querySelector("#rclone-wizard-toggle");
+      rcToggle.addEventListener("click", () => {
+        const hidden = rcWrap.classList.toggle("hidden");
+        rcToggle.textContent = (hidden ? "▶" : "▼") + " Quick-Setup Assistent (Google Drive / OneDrive)";
+      });
+
+      function rcShowPanel(n) {
+        fieldsEl.querySelectorAll("#rclone-wizard .wizard-panel").forEach(p => p.classList.toggle("hidden", p.dataset.panel != n));
+        fieldsEl.querySelectorAll("#rclone-wizard .wizard-step").forEach(s => {
+          s.classList.toggle("active", s.dataset.step == n);
+          s.classList.toggle("done", s.dataset.step < n);
+        });
+      }
+
+      // Update command when provider changes
+      function updateRcloneCmd() {
+        const prov = fieldsEl.querySelector("input[name='rclone-provider']:checked")?.value || "google";
+        const type = prov === "google" ? "drive" : "onedrive";
+        fieldsEl.querySelector("#rclone-auth-cmd").textContent = `docker run --rm -it rclone/rclone authorize "${type}"`;
+        // Suggest remote name
+        const nameInput = fieldsEl.querySelector("#rclone-wizard-remote-name");
+        if (nameInput && !nameInput.value) nameInput.placeholder = prov === "google" ? "gdrive" : "onedrive";
+      }
+      fieldsEl.querySelectorAll("input[name='rclone-provider']").forEach(r => r.addEventListener("change", updateRcloneCmd));
+
+      fieldsEl.querySelectorAll(".rclone-wizard-next").forEach(btn =>
+        btn.addEventListener("click", () => { updateRcloneCmd(); rcShowPanel(btn.dataset.next); }));
+      fieldsEl.querySelectorAll(".rclone-wizard-back").forEach(btn =>
+        btn.addEventListener("click", () => rcShowPanel(btn.dataset.back)));
+
+      fieldsEl.querySelector("#rclone-cmd-copy").addEventListener("click", () => {
+        navigator.clipboard.writeText(fieldsEl.querySelector("#rclone-auth-cmd").textContent).catch(() => {});
+      });
+
+      fieldsEl.querySelector("#rclone-wizard-create-btn").addEventListener("click", async () => {
+        const btn = fieldsEl.querySelector("#rclone-wizard-create-btn");
+        const result = fieldsEl.querySelector("#rclone-wizard-result");
+        const provider = fieldsEl.querySelector("input[name='rclone-provider']:checked")?.value || "google";
+        const tokenJson = fieldsEl.querySelector("#rclone-token-input").value.trim();
+        const remoteName = fieldsEl.querySelector("#rclone-wizard-remote-name").value.trim() ||
+                           (provider === "google" ? "gdrive" : "onedrive");
+        result.innerHTML = "";
+        btn.disabled = true;
+        btn.textContent = "Erstelle...";
+        try {
+          const res = await api("/api/settings/rclone/quick-setup", {
+            method: "POST",
+            body: JSON.stringify({ provider, token_json: tokenJson, remote_name: remoteName }),
+          });
+          // Fill in the remote name field
+          const remoteInput = fieldsEl.querySelector("#cfg-remote");
+          if (remoteInput) remoteInput.value = res.remote_name;
+          fieldsEl.querySelector("#rclone-done-name").textContent = res.remote_name;
+          rcShowPanel(4);
+        } catch (e) {
+          result.innerHTML = `<span class="badge failed">${escHtml(e.message)}</span>`;
+        } finally {
+          btn.disabled = false;
+          btn.textContent = "Config erstellen →";
+        }
+      });
     }
   }
   if (existing) {
