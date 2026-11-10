@@ -212,47 +212,167 @@ tr:last-child td { border-bottom: none; }
 .wizard-warning { background: rgba(220,160,0,.12); border: 1px solid rgba(220,160,0,.4); border-radius: 6px; padding: 8px 12px; margin: 8px 0 14px; font-size: .85rem; }
 .hidden { display: none !important; }
 
+/* ── Mobile top bar (hidden on desktop) ── */
+.mobile-topbar { display: none; }
+.icon-btn {
+  width: 40px; height: 40px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-elev-2);
+  color: var(--text); font-size: 1.1rem; display: inline-flex; align-items: center; justify-content: center; cursor: pointer;
+}
+
+/* Tables inside cards scroll horizontally instead of being clipped (tablet widths). */
+.card:has(> table), .accordion-body { overflow-x: auto; }
+.modal-overlay { z-index: 95; }
+td.cell-actions { flex-wrap: wrap; gap: 6px !important; }
+td.cell-actions .btn { white-space: nowrap; }
+
+/* ── Tablet ── */
+@media (max-width: 1000px) {
+  .sidebar { width: 190px; }
+  .main { padding: 22px 20px; }
+  td .btn, .cell-actions .btn { padding: 7px 11px; }
+}
+
+/* ── Phone ── */
 @media (max-width: 640px) {
+  html { -webkit-text-size-adjust: 100%; }
+  #app { display: block; }
+  #app > div { flex-direction: column; }
   .sidebar { display: none; }
+
+  .mobile-topbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    position: sticky; top: 0; z-index: 70;
+    padding: 8px 14px; padding-top: calc(8px + env(safe-area-inset-top, 0px));
+    background: var(--bg-elev); border-bottom: 1px solid var(--border);
+  }
+  .mobile-topbar .brand { font-weight: 700; font-size: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mobile-topbar-actions { display: flex; gap: 8px; flex-shrink: 0; }
+  .mobile-user-menu {
+    position: absolute; top: calc(100% + 6px); right: 14px; width: 220px;
+    background: var(--bg-elev); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 14px; display: flex; flex-direction: column; gap: 10px; font-size: .9rem;
+  }
+  .mobile-user-menu.hidden { display: none !important; }
+
   .mobile-nav { display: flex; }
+  .mobile-nav-item { min-width: 0; padding: 6px 1px; font-size: .64rem; }
+  .mobile-nav-item .m-label { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .main {
-    padding: 16px 14px;
-    padding-bottom: calc(54px + env(safe-area-inset-bottom, 0px) + 12px);
-    max-height: none;
+    padding: 16px 12px;
+    padding-bottom: calc(54px + env(safe-area-inset-bottom, 0px) + 16px);
+    max-height: none; overflow: visible;
   }
 
   .grid.cols-4,
   .grid.cols-3 { grid-template-columns: 1fr; }
+  .grid { gap: 12px; }
+  .card { padding: 14px 14px; }
 
-  .page-header { flex-wrap: wrap; gap: 8px; }
-  .page-header .actions { flex-wrap: wrap; gap: 6px; }
-  .page-header h2 { font-size: 1.2rem; }
+  .page-header { flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+  .page-header h2 { font-size: 1.25rem; }
+  .page-header .actions { flex-wrap: wrap; gap: 8px; width: 100%; }
+  .page-header .actions .btn { flex: 1 1 auto; justify-content: center; }
+  .section-title { margin: 22px 0 8px; }
 
-  .auth-card { width: min(360px, 92vw); }
+  /* Inputs: 16px font stops iOS from zooming into the page on focus. */
+  .field input, .field select, .field textarea, .toolbar input[type=text], input[type=text], input[type=password],
+  input[type=number], input[type=url], input[type=email], select, textarea { font-size: 16px; }
+  .field input, .field select { padding: 11px 12px; }
 
+  .btn { min-height: 40px; }
+  .toolbar { gap: 8px; }
+  .toolbar input[type=text] { width: 100%; }
+
+  .auth-card { width: 100%; max-width: 400px; margin: 16px; padding: 24px 20px; }
+
+  /* Floating job tray: compact cards above the bottom nav, tap to expand. */
   .job-tray {
     bottom: calc(54px + env(safe-area-inset-bottom, 0px) + 8px);
-    left: 10px; right: 10px; width: auto; max-width: none;
+    left: 8px; right: 8px; width: auto; max-width: none; gap: 6px;
+    max-height: 45vh; overflow-y: auto;
   }
-  .toast-stack { top: 10px; right: 10px; left: 10px; }
-  .toast { min-width: unset; font-size: .84rem; }
+  .job-tray .job-card { padding: 10px 12px; gap: 4px; box-shadow: var(--shadow); }
+  .job-tray .job-card .job-title { cursor: pointer; gap: 8px; }
+  .job-tray .job-card .job-title > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .job-tray .job-card:not(.expanded) .job-step,
+  .job-tray .job-card:not(.expanded) .job-log-wrap,
+  .job-tray .job-card:not(.expanded) .row-actions,
+  .job-tray .job-card:not(.expanded) .progress-meta .job-elapsed { display: none; }
+  .job-tray .job-card:not(.expanded) .progress-wrap { margin-top: 2px; }
+  .progress-meta { flex-wrap: wrap; gap: 2px 10px; }
+  .job-card .job-title { gap: 8px; }
 
-  .accordion-head { flex-wrap: wrap; gap: 6px; padding: 12px 14px; }
-  .accordion-body { overflow-x: auto; }
+  .toast-stack { top: calc(64px + env(safe-area-inset-top, 0px)); right: 10px; left: 10px; }
+  .toast { min-width: unset; font-size: .86rem; }
 
-  table { font-size: .82rem; }
-  td, th { padding: 7px 9px; }
+  .accordion-head { flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+  .bulk-bar { flex-wrap: wrap; padding: 8px 14px; }
 
-  .modal { padding: 18px 16px; }
-  .modal .row-actions { flex-wrap: wrap; }
+  /* Tables become stacked cards: one card per row, "label: value" per cell. */
+  .card:has(> table.rtable), .accordion-body { overflow-x: visible; }
+  table.rtable, table.rtable tbody, table.rtable tr, table.rtable td { display: block; width: 100% !important; }
+  table.rtable { table-layout: auto !important; }
+  table.rtable colgroup { display: none; }
+  table.rtable thead { display: none; }
+  table.rtable thead:has(input[type=checkbox]) { display: block; border-bottom: 1px solid var(--border); }
+  table.rtable thead:has(input[type=checkbox]) tr { display: flex; align-items: center; }
+  table.rtable thead:has(input[type=checkbox]) th { display: none; }
+  table.rtable thead:has(input[type=checkbox]) th:first-child { display: flex; align-items: center; gap: 8px; width: auto !important; padding: 10px 14px; border: none; }
+  table.rtable thead:has(input[type=checkbox]) th:first-child::after { content: "Alle auswählen"; text-transform: none; letter-spacing: 0; font-weight: 500; }
+  table.rtable tr { padding: 10px 14px; border-bottom: 1px solid var(--border); }
+  table.rtable tr:last-child { border-bottom: none; }
+  table.rtable td {
+    display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+    padding: 4px 0; border: none; font-size: .9rem; text-align: right; min-width: 0;
+    overflow-wrap: anywhere; white-space: normal !important;
+  }
+  table.rtable td > * { min-width: 0; }
+  table.rtable td::before {
+    content: attr(data-label); flex-shrink: 0; max-width: 45%; text-align: left;
+    color: var(--text-dim); font-size: .74rem; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
+  }
+  table.rtable td[data-label=""]::before { display: none; }
+  table.rtable td[data-label=""] { justify-content: flex-start; text-align: left; }
+  /* First column is the row's title: show it big, without a label. */
+  table.rtable td:first-child:not([colspan]) { font-weight: 600; font-size: .98rem; }
+  table.rtable td:first-child:not([colspan])::before { display: none; }
+  table.rtable td:first-child:not([colspan]) { justify-content: flex-start; text-align: left; }
+  /* Checkbox column (backups): checkbox + next cell share the title line. */
+  table.rtable td:first-child:has(> input[type=checkbox]) { float: left; width: auto !important; padding: 4px 10px 0 0 !important; }
+  table.rtable td:first-child:has(> input[type=checkbox]) + td { font-weight: 600; justify-content: flex-start; width: auto !important; }
+  table.rtable td:first-child:has(> input[type=checkbox]) + td::before { display: none; }
+  table.rtable td.cell-actions, table.rtable td:last-child:has(.btn) {
+    flex-wrap: wrap; justify-content: flex-start; gap: 8px; padding-top: 10px;
+  }
+  table.rtable td.cell-actions::before, table.rtable td:last-child:has(.btn)::before { display: none; }
+  table.rtable td.cell-actions .btn, table.rtable td:last-child:has(.btn) .btn { flex: 1 1 auto; justify-content: center; }
+  table.rtable td .empty-state { width: 100%; padding: 20px 6px; }
+  /* Logs: tighter cards, message full width. */
+  #logs-tbody td:last-child { display: block; text-align: left; padding-top: 6px; }
+  #logs-tbody td:last-child::before { display: block; margin-bottom: 2px; max-width: none; }
 
-  .toolbar input[type=text] { width: 100%; }
-  .btn { font-size: .84rem; min-height: 36px; }
+  /* Modals become bottom sheets that use the full width. */
+  .modal-overlay { align-items: flex-end; }
+  .modal {
+    width: 100% !important; max-width: 100% !important; max-height: 92vh; max-height: 92dvh;
+    border-radius: 16px 16px 0 0; padding: 18px 16px; padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    border-bottom: none;
+  }
+  .modal .row-actions { flex-wrap: wrap; position: sticky; bottom: calc(-18px - env(safe-area-inset-bottom, 0px)); background: var(--bg-elev); padding: 12px 0 4px; margin-top: 12px; }
+  .modal .row-actions .btn { flex: 1 1 auto; justify-content: center; }
+  .modal .grid.cols-3, .modal .grid.cols-4 { grid-template-columns: 1fr; }
 
   .stat-card .value { font-size: 1.35rem; }
 
   .wizard-steps { gap: 6px; }
   .wizard-step { flex: 1; min-width: 0; }
   .step-label { font-size: .72rem; }
+  .wizard-uri-box { flex-wrap: wrap; }
+}
+
+@media (max-width: 380px) {
+  .mobile-nav-item { font-size: .58rem; }
+  .mobile-nav-item .m-icon { font-size: 1.15rem; }
+  .main { padding-left: 10px; padding-right: 10px; }
 }
