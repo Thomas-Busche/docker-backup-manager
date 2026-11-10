@@ -627,7 +627,12 @@ def sync_to_selected_targets(backup_path: Path, target_ids: list[int], on_progre
 
 def _sync_to_targets(backup_path: Path, target_ids: Optional[list[int]], on_progress=None) -> list[dict]:
     """Never raises - a failed off-site copy must not make the (already
-    successful) local backup look failed."""
+    successful) local backup look failed. Targets are independent of each
+    other, so they are uploaded to in parallel (DBM_SYNC_PARALLELISM); the DB
+    is only touched from this thread."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.config import SYNC_PARALLELISM
     from app.database import SessionLocal
     from app.models import StorageTarget
 
@@ -640,21 +645,43 @@ def _sync_to_targets(backup_path: Path, target_ids: Optional[list[int]], on_prog
                 return []
             query = query.filter(StorageTarget.id.in_(target_ids))
         targets = query.all()
-        for idx, target in enumerate(targets, start=1):
-            if on_progress:
-                on_progress(f"Uploading to {target.name}", idx, len(targets))
+        if not targets:
+            return []
+        jobs = [(t.id, t.name, t.type, t.config_json) for t in targets]
+        by_id = {t.id: t for t in targets}
+        done = [0]
+
+        def run(job):
+            target_id, name, target_type, config_json = job
             try:
-                sync_to_target(backup_path, target.type, target.config_json)
-                target.last_sync_status = "ok"
-                target.last_sync_error = None
-                results.append({"target": target.name, "target_id": target.id, "ok": True})
+                sync_to_target(backup_path, target_type, config_json)
+                return target_id, None
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Storage sync failed for target %s", target.name)
-                target.last_sync_status = "failed"
-                target.last_sync_error = str(exc)
-                results.append({"target": target.name, "target_id": target.id, "ok": False, "error": str(exc)})
+                logger.exception("Storage sync failed for target %s", name)
+                return target_id, str(exc) or exc.__class__.__name__
+
+        if on_progress:
+            on_progress(f"Uploading to {', '.join(j[1] for j in jobs)}", 0, len(jobs))
+        with ThreadPoolExecutor(max_workers=min(SYNC_PARALLELISM, len(jobs)),
+                                thread_name_prefix="storage-sync") as pool:
+            outcomes = {}
+            for target_id, error in pool.map(run, jobs):
+                outcomes[target_id] = error
+                done[0] += 1
+                if on_progress:
+                    on_progress(f"Uploaded to {by_id[target_id].name}", done[0], len(jobs))
+
+        for target_id, name, _type, _cfg in jobs:
+            target = by_id[target_id]
+            error = outcomes[target_id]
+            target.last_sync_status = "ok" if error is None else "failed"
+            target.last_sync_error = error
             target.last_sync_at = utcnow()
-            db.commit()
+            entry = {"target": name, "target_id": target_id, "ok": error is None}
+            if error is not None:
+                entry["error"] = error
+            results.append(entry)
+        db.commit()
     finally:
         db.close()
     return results

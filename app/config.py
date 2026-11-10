@@ -48,6 +48,17 @@ LOGIN_LOCKOUT_SECONDS = int(os.environ.get("DBM_LOGIN_LOCKOUT_SECONDS", str(5 * 
 
 DOCKER_HELPER_IMAGE = os.environ.get("DBM_HELPER_IMAGE", "alpine:3.20")
 
+# gzip level for local volume archives (1 = fastest, 9 = smallest). gzip is
+# single-threaded and usually the bottleneck of a local backup; level 1 is
+# typically 2-3x faster than the default 6 for only slightly larger archives.
+try:
+    GZIP_LEVEL = min(9, max(1, int(os.environ.get("DBM_GZIP_LEVEL", "6"))))
+except ValueError:
+    GZIP_LEVEL = 6
+
+# How many storage targets a finished backup is uploaded to at the same time.
+SYNC_PARALLELISM = max(1, int(os.environ.get("DBM_SYNC_PARALLELISM", "3") or 3))
+
 # Timezone schedules are evaluated in (IANA name, e.g. "Europe/Berlin"). Defaults
 # to UTC because that's the only thing guaranteed to be correct out of the box -
 # the container has no way to know the operator's local timezone on its own, and

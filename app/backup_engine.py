@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 from app import encryption, netpulse, restic_engine, storage_sync
-from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE, container_path_to_host
+from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE, GZIP_LEVEL, container_path_to_host
 from app.docker_client import get_client
 
 logger = logging.getLogger("dbm.backup_engine")
@@ -141,6 +141,22 @@ def _should_backup_bind_mount(source: str) -> bool:
     return True
 
 
+def _archive_shell_command(compress: bool, gzip_level: int = 6) -> str:
+    """Shell command for the helper container that writes the archive to stdout.
+
+    Single-file bind mounts (e.g. /etc/localtime) are mounted at /data as a
+    FILE, not a directory - "tar -C /data ." would fail. The shell conditional
+    handles both: directories get their contents archived, files directly.
+    The default gzip level keeps busybox tar's built-in -z (identical to
+    before); any other level pipes through gzip, with pipefail so a failing
+    tar still makes the container exit non-zero."""
+    if not compress or gzip_level == 6:
+        flags = "czf" if compress else "cf"
+        return f"if [ -d /data ]; then tar {flags} - -C /data .; else tar {flags} - /data; fi"
+    return (f"set -o pipefail; {{ if [ -d /data ]; then tar cf - -C /data .; else tar cf - /data; fi; }}"
+            f" | gzip -{int(gzip_level)}")
+
+
 def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _never_cancel,
                             on_bytes: BytesCallback = None,
                             compress: bool = True) -> Iterator[bytes]:
@@ -189,14 +205,9 @@ def iter_volume_tar_chunks(volume_name: str, should_cancel: ShouldCancel = _neve
     """
     client = get_client()
     _ensure_helper_image(client)
-    tar_flags = "czf" if compress else "cf"
-    # Single-file bind mounts (e.g. /etc/localtime) are mounted at /data as a
-    # FILE, not a directory — "tar -C /data ." would fail. Use a shell conditional
-    # so both cases work: directories get their contents archived, files get
-    # archived directly.
     container = client.containers.create(
         DOCKER_HELPER_IMAGE,
-        command=["sh", "-c", f"if [ -d /data ]; then tar {tar_flags} - -C /data .; else tar {tar_flags} - /data; fi"],
+        command=["sh", "-c", _archive_shell_command(compress, GZIP_LEVEL)],
         volumes={volume_name: {"bind": "/data", "mode": "ro"}},
         tty=False,
         log_config={"Type": "none"},
