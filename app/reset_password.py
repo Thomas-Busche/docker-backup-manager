@@ -29,10 +29,13 @@ def reset_password(username: str, new_password: str) -> None:
             user.password_hash = hash_password(new_password)
             user.failed_attempts = 0
             user.locked_until = None
+            # This is the recovery path for a lost admin login - make sure the
+            # recovered account can actually manage the install again.
+            user.is_admin = True
             db.commit()
             print(f"Password for existing user '{username}' has been reset.")
         else:
-            user = User(username=username, password_hash=hash_password(new_password))
+            user = User(username=username, password_hash=hash_password(new_password), is_admin=True)
             db.add(user)
             db.commit()
             print(f"User '{username}' did not exist and has been created.")

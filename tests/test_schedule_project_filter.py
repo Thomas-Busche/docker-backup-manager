@@ -85,7 +85,7 @@ def test_run_schedule_passes_stop_containers_to_backup_landscape(monkeypatch):
 
     captured = {}
 
-    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None, on_bytes=None):
+    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None, on_bytes=None, **kwargs):
         captured["stop_containers"] = stop_containers
         return BackupResult(ok=True, name=label, path=dest_root / "_landscapes" / "db-backup" / "v1", size_bytes=1)
 
@@ -116,7 +116,7 @@ def test_run_schedule_writes_log_entries_for_start_and_success(monkeypatch):
     finally:
         db.close()
 
-    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None, on_bytes=None):
+    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None, on_bytes=None, **kwargs):
         return BackupResult(ok=True, name=label, path=dest_root / "_landscapes" / "logged" / "v1", size_bytes=1)
 
     monkeypatch.setattr(scheduler.backup_engine, "backup_landscape", fake_backup_landscape)
@@ -150,7 +150,7 @@ def test_run_schedule_passes_name_contains_to_backup_landscape(monkeypatch):
 
     captured = {}
 
-    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None, on_bytes=None):
+    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None, on_bytes=None, **kwargs):
         captured["name_contains"] = name_contains
         return BackupResult(ok=True, name=label, path=dest_root / "_landscapes" / "aio" / "v1", size_bytes=1)
 
@@ -183,7 +183,7 @@ def test_run_schedule_passes_project_filter_to_backup_landscape(monkeypatch):
 
     captured = {}
 
-    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None, on_bytes=None):
+    def fake_backup_landscape(dest_root, project_filter=None, name_contains=None, label=None, on_progress=None, stream_target=None, should_cancel=None, stop_containers=None, on_bytes=None, **kwargs):
         captured["project_filter"] = project_filter
         return BackupResult(ok=True, name=label, path=dest_root / "_landscapes" / "nextcloud" / "v1", size_bytes=1)
 
