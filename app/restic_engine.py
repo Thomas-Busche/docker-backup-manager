@@ -158,8 +158,9 @@ def repo_url_and_env(
         repo = str(Path(config["path"]) / safe / "restic_repo")
 
     elif target_type == "smb":
-        share = config["share"]
-        base = config.get("base_path", "").strip("/\\")
+        # Users sometimes type Windows-style paths ("Backup\\Clients"); rclone needs "/".
+        share = config["share"].replace("\\", "/").strip("/")
+        base = config.get("base_path", "").replace("\\", "/").strip("/")
         parts = [p for p in [share, base, safe, "restic_repo"] if p]
         repo = "rclone:dbm_smb:" + "/".join(parts)
         smb_conf_path = _write_smb_rclone_conf(config)
@@ -184,6 +185,10 @@ def repo_url_and_env(
         remote_path = config.get("remote_path", "").strip("/")
         base_parts = [p for p in [remote_path, safe, "restic_repo"] if p]
         repo = f"rclone:{remote}:" + "/".join(base_parts)
+        # restic spawns rclone itself; without this it looks for
+        # ~/.config/rclone/rclone.conf and can't find the configured remote.
+        from app.storage_sync import RCLONE_CONFIG_PATH
+        env["RCLONE_CONFIG"] = RCLONE_CONFIG_PATH
 
     else:
         raise ValueError(
@@ -504,7 +509,9 @@ def forget_snapshot(repo_url: str, env: dict, password: str, snapshot_id: str) -
         [RESTIC_BIN, "-r", repo_url, "forget", "--prune", snapshot_id],
         capture_output=True,
         env=_full_env(env, password),
-        timeout=300,
+        # prune rewrites pack files - on a large repo over a WAN link this
+        # takes far longer than a few minutes.
+        timeout=3 * 3600,
     )
     if result.returncode != 0:
         raise RuntimeError(

@@ -29,8 +29,10 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import os
 import shutil
 import subprocess
+import threading
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
@@ -46,6 +48,52 @@ logger = logging.getLogger("dbm.storage_sync")
 _SMB_IO_BUFFER_SIZE = 1024 * 1024
 
 RCLONE_CONFIG_PATH = "/data/rclone.conf"
+
+# Upper bound for one rclone transfer (whole backup copy / single volume
+# download). Large backups over a slow uplink easily need more than an hour -
+# the old 1h limit killed perfectly healthy multi-GB uploads.
+TRANSFER_TIMEOUT_SECONDS = int(os.environ.get("DBM_TRANSFER_TIMEOUT", str(12 * 3600)))
+
+# Flags for every rclone call that moves data: retry transient errors on the
+# whole operation and on individual low-level requests.
+_RCLONE_TRANSFER_FLAGS = ["--retries", "3", "--low-level-retries", "10"]
+
+
+def _rclone_path(config: dict, relative: str = "") -> str:
+    """Builds "remote:path" for an rclone target. With an empty remote_path
+    the result must stay relative ("remote:key", not "remote:/key") - for SFTP
+    and local remotes a leading slash means the filesystem root instead of the
+    remote's home/base directory. Matches how restic_engine builds repo URLs."""
+    remote = config["remote"]
+    parts = [p.strip("/") for p in (config.get("remote_path", ""), relative.replace("\\", "/")) if p and p.strip("/")]
+    return f"{remote}:" + "/".join(parts)
+
+
+def _s3_client(config: dict):
+    """boto3 S3 client with explicit timeouts and adaptive retries, so a flaky
+    connection to S3/MinIO/Wasabi/B2 doesn't fail a backup on the first hiccup
+    and a dead endpoint doesn't hang forever."""
+    import boto3  # imported lazily so boto3 is only required if S3 targets are used
+    from botocore.config import Config
+
+    session = boto3.session.Session(
+        aws_access_key_id=config["access_key"],
+        aws_secret_access_key=config["secret_key"],
+        region_name=config.get("region") or None,
+    )
+    return session.client(
+        "s3",
+        endpoint_url=config.get("endpoint_url") or None,
+        config=Config(connect_timeout=30, read_timeout=300,
+                      retries={"max_attempts": 10, "mode": "adaptive"}),
+    )
+
+
+def _s3_dir_prefix(config: dict, relative_key: str) -> str:
+    """Key prefix for everything *inside* a backup directory. The trailing
+    slash matters: without it, the prefix for ".../v1" also matches ".../v10"
+    and deleting or downloading one version would touch the other."""
+    return "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_key.strip("/")])) + "/"
 
 
 def _relative_key(backup_path: Path) -> str:
@@ -65,14 +113,7 @@ def sync_local_path(backup_path: Path, config: dict) -> None:
 
 
 def sync_s3(backup_path: Path, config: dict) -> None:
-    import boto3  # imported lazily so boto3 is only required if S3 targets are used
-
-    session = boto3.session.Session(
-        aws_access_key_id=config["access_key"],
-        aws_secret_access_key=config["secret_key"],
-        region_name=config.get("region") or None,
-    )
-    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    s3 = _s3_client(config)
     bucket = config["bucket"]
     prefix = config.get("prefix", "").strip("/")
     key_root = _relative_key(backup_path)
@@ -174,11 +215,9 @@ def sync_smb(backup_path: Path, config: dict) -> None:
 
 
 def sync_rclone(backup_path: Path, config: dict) -> None:
-    remote = config["remote"]
-    remote_path = config.get("remote_path", "").strip("/")
-    dest = f"{remote}:{remote_path}/{_relative_key(backup_path)}".replace("\\", "/")
-    cmd = ["rclone", "copy", str(backup_path), dest, "--config", RCLONE_CONFIG_PATH]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
+    dest = _rclone_path(config, _relative_key(backup_path))
+    cmd = ["rclone", "copy", str(backup_path), dest, "--config", RCLONE_CONFIG_PATH, *_RCLONE_TRANSFER_FLAGS]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=TRANSFER_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         raise RuntimeError(f"rclone failed: {proc.stderr.strip() or proc.stdout.strip()}")
 
@@ -230,21 +269,21 @@ def _delete_local_path(config: dict, relative_key: str) -> None:
 
 
 def _delete_s3(config: dict, relative_key: str) -> None:
-    import boto3
-
-    session = boto3.session.Session(
-        aws_access_key_id=config["access_key"],
-        aws_secret_access_key=config["secret_key"],
-        region_name=config.get("region") or None,
-    )
-    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    s3 = _s3_client(config)
     bucket = config["bucket"]
-    prefix = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_key]))
+    prefix = _s3_dir_prefix(config, relative_key)
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         keys = [{"Key": obj["Key"]} for obj in page.get("Contents", [])]
         if keys:
-            s3.delete_objects(Bucket=bucket, Delete={"Objects": keys})
+            resp = s3.delete_objects(Bucket=bucket, Delete={"Objects": keys, "Quiet": True})
+            errors = resp.get("Errors") or []
+            if errors:
+                first = errors[0]
+                raise RuntimeError(
+                    f"S3: {len(errors)} Objekt(e) konnten nicht gelöscht werden "
+                    f"({first.get('Key')}: {first.get('Code')} {first.get('Message')})"
+                )
 
 
 def _delete_smb(config: dict, relative_key: str) -> None:
@@ -273,9 +312,9 @@ def _delete_smb(config: dict, relative_key: str) -> None:
 
 
 def _delete_rclone(config: dict, relative_key: str) -> None:
-    remote = config["remote"]
-    remote_path = config.get("remote_path", "").strip("/")
-    dest = f"{remote}:{remote_path}/{relative_key}".replace("\\", "/")
+    if not relative_key.strip("/"):
+        raise ValueError("rclone: leerer Pfad - Löschen des Zielordners verweigert")
+    dest = _rclone_path(config, relative_key)
     proc = subprocess.run(
         ["rclone", "purge", dest, "--config", RCLONE_CONFIG_PATH],
         capture_output=True, text=True, timeout=300,
@@ -286,7 +325,7 @@ def _delete_rclone(config: dict, relative_key: str) -> None:
     parts = relative_key.replace("\\", "/").split("/")
     for i in range(len(parts) - 1, 0, -1):
         parent_key = "/".join(parts[:i])
-        parent_dest = f"{remote}:{remote_path}/{parent_key}".replace("\\", "/")
+        parent_dest = _rclone_path(config, parent_key)
         result = subprocess.run(
             ["rclone", "rmdir", parent_dest, "--config", RCLONE_CONFIG_PATH],
             capture_output=True, text=True, timeout=30,
@@ -333,9 +372,7 @@ def try_rmdir_on_target(target_type: str, config_json: str, relative_key: str) -
     config = json.loads(config_json or "{}")
     try:
         if target_type == "rclone":
-            remote = config["remote"]
-            remote_path = config.get("remote_path", "").strip("/")
-            dest = f"{remote}:{remote_path}/{relative_key}".replace("\\", "/")
+            dest = _rclone_path(config, relative_key)
             subprocess.run(
                 ["rclone", "rmdir", dest, "--config", RCLONE_CONFIG_PATH],
                 capture_output=True, text=True, timeout=30,
@@ -385,14 +422,7 @@ def _stream_upload_local_path(config: dict, relative_path: str, chunks) -> None:
 
 
 def _stream_upload_s3(config: dict, relative_path: str, chunks) -> None:
-    import boto3
-
-    session = boto3.session.Session(
-        aws_access_key_id=config["access_key"],
-        aws_secret_access_key=config["secret_key"],
-        region_name=config.get("region") or None,
-    )
-    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    s3 = _s3_client(config)
     key = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_path]))
     s3.upload_fileobj(_ChunkIteratorReader(chunks), config["bucket"], key)
 
@@ -411,24 +441,34 @@ def _stream_upload_smb(config: dict, relative_path: str, chunks) -> None:
 
 
 def _stream_upload_rclone(config: dict, relative_path: str, chunks) -> None:
-    remote = config["remote"]
-    remote_path = config.get("remote_path", "").strip("/")
-    dest = f"{remote}:{remote_path}/{relative_path}".replace("\\", "/")
+    dest = _rclone_path(config, relative_path)
     proc = subprocess.Popen(
-        ["rclone", "rcat", dest, "--config", RCLONE_CONFIG_PATH],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        ["rclone", "rcat", dest, "--config", RCLONE_CONFIG_PATH, "--low-level-retries", "10"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
+    # Drain stderr concurrently: if rclone logs more than a pipe buffer's worth
+    # while we're still writing stdin, both sides would block forever.
+    stderr_chunks: list[bytes] = []
+    reader = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
+    reader.start()
     try:
-        for chunk in chunks:
-            proc.stdin.write(chunk)
-        proc.stdin.close()
-        stderr = proc.stderr.read()
-        code = proc.wait(timeout=3600)
+        try:
+            for chunk in chunks:
+                proc.stdin.write(chunk)
+            proc.stdin.close()
+        except BrokenPipeError:
+            # rclone exited early (bad remote, auth error, ...) - report its
+            # own error message below instead of a bare "Broken pipe".
+            pass
+        code = proc.wait(timeout=TRANSFER_TIMEOUT_SECONDS)
+        reader.join(timeout=10)
         if code != 0:
-            raise RuntimeError(f"rclone rcat failed: {stderr.decode(errors='replace').strip()}")
+            stderr = b"".join(stderr_chunks).decode(errors="replace").strip()
+            raise RuntimeError(f"rclone rcat failed: {stderr or f'exit code {code}'}")
     finally:
         if proc.poll() is None:
             proc.kill()
+            proc.wait()
 
 
 STREAM_UPLOAD_HANDLERS = {
@@ -455,22 +495,13 @@ def _delete_partial_smb(config: dict, relative_path: str) -> None:
 
 
 def _delete_partial_s3(config: dict, relative_path: str) -> None:
-    import boto3
-
-    session = boto3.session.Session(
-        aws_access_key_id=config["access_key"],
-        aws_secret_access_key=config["secret_key"],
-        region_name=config.get("region") or None,
-    )
-    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    s3 = _s3_client(config)
     key = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_path]))
     s3.delete_object(Bucket=config["bucket"], Key=key)
 
 
 def _delete_partial_rclone(config: dict, relative_path: str) -> None:
-    remote = config["remote"]
-    remote_path = config.get("remote_path", "").strip("/")
-    dest = f"{remote}:{remote_path}/{relative_path}".replace("\\", "/")
+    dest = _rclone_path(config, relative_path)
     subprocess.run(
         ["rclone", "deletefile", dest, "--config", RCLONE_CONFIG_PATH],
         capture_output=True, text=True, timeout=300,
@@ -534,14 +565,7 @@ def _download_local_path(config: dict, relative_path: str, dest_path: Path) -> N
 
 
 def _download_s3(config: dict, relative_path: str, dest_path: Path) -> None:
-    import boto3
-
-    session = boto3.session.Session(
-        aws_access_key_id=config["access_key"],
-        aws_secret_access_key=config["secret_key"],
-        region_name=config.get("region") or None,
-    )
-    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    s3 = _s3_client(config)
     key = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_path]))
     s3.download_file(config["bucket"], key, str(dest_path))
 
@@ -557,12 +581,10 @@ def _download_smb(config: dict, relative_path: str, dest_path: Path) -> None:
 
 
 def _download_rclone(config: dict, relative_path: str, dest_path: Path) -> None:
-    remote = config["remote"]
-    remote_path = config.get("remote_path", "").strip("/")
-    src = f"{remote}:{remote_path}/{relative_path}".replace("\\", "/")
+    src = _rclone_path(config, relative_path)
     proc = subprocess.run(
-        ["rclone", "copyto", src, str(dest_path), "--config", RCLONE_CONFIG_PATH],
-        capture_output=True, text=True, timeout=3600,
+        ["rclone", "copyto", src, str(dest_path), "--config", RCLONE_CONFIG_PATH, *_RCLONE_TRANSFER_FLAGS],
+        capture_output=True, text=True, timeout=TRANSFER_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"rclone copyto failed: {proc.stderr.strip() or proc.stdout.strip()}")
@@ -647,13 +669,7 @@ def check_target_connection(target_type: str, config_json: str) -> None:
         probe.write_text("ok")
         probe.unlink()
     elif target_type == "s3":
-        import boto3
-        session = boto3.session.Session(
-            aws_access_key_id=config["access_key"],
-            aws_secret_access_key=config["secret_key"],
-            region_name=config.get("region") or None,
-        )
-        s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+        s3 = _s3_client(config)
         s3.head_bucket(Bucket=config["bucket"])
     elif target_type == "smb":
         import smbclient
@@ -791,14 +807,7 @@ def _list_backups_local_path(config: dict) -> list[dict]:
 
 
 def _list_backups_s3(config: dict) -> list[dict]:
-    import boto3
-
-    session = boto3.session.Session(
-        aws_access_key_id=config["access_key"],
-        aws_secret_access_key=config["secret_key"],
-        region_name=config.get("region") or None,
-    )
-    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    s3 = _s3_client(config)
     bucket = config["bucket"]
     prefix = config.get("prefix", "").strip("/")
     list_prefix = prefix + "/" if prefix else ""
@@ -886,9 +895,7 @@ def _list_backups_smb(config: dict) -> list[dict]:
 
 
 def _list_backups_rclone(config: dict) -> list[dict]:
-    remote = config["remote"]
-    remote_path = config.get("remote_path", "").strip("/")
-    src = f"{remote}:{remote_path}".rstrip(":") if not remote_path else f"{remote}:{remote_path}"
+    src = _rclone_path(config)
     proc = subprocess.run(
         ["rclone", "lsjson", src, "-R", "--files-only", "--config", RCLONE_CONFIG_PATH],
         capture_output=True, text=True, timeout=300,
@@ -958,16 +965,9 @@ def _download_full_local_path(config: dict, relative_key: str, dest_dir: Path) -
 
 
 def _download_full_s3(config: dict, relative_key: str, dest_dir: Path) -> None:
-    import boto3
-
-    session = boto3.session.Session(
-        aws_access_key_id=config["access_key"],
-        aws_secret_access_key=config["secret_key"],
-        region_name=config.get("region") or None,
-    )
-    s3 = session.client("s3", endpoint_url=config.get("endpoint_url") or None)
+    s3 = _s3_client(config)
     bucket = config["bucket"]
-    prefix = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_key]))
+    prefix = _s3_dir_prefix(config, relative_key)
     paginator = s3.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
@@ -997,8 +997,8 @@ def _download_full_smb(config: dict, relative_key: str, dest_dir: Path) -> None:
         sub = "/".join(sub_parts)
         src = f"dbm_smb:{top_share}/{sub}" if sub else f"dbm_smb:{top_share}"
         proc = subprocess.run(
-            ["rclone", "copy", src, str(dest_dir), "--config", smb_conf_path],
-            capture_output=True, text=True, timeout=300,
+            ["rclone", "copy", src, str(dest_dir), "--config", smb_conf_path, *_RCLONE_TRANSFER_FLAGS],
+            capture_output=True, text=True, timeout=TRANSFER_TIMEOUT_SECONDS,
         )
     finally:
         try:
@@ -1010,12 +1010,10 @@ def _download_full_smb(config: dict, relative_key: str, dest_dir: Path) -> None:
 
 
 def _download_full_rclone(config: dict, relative_key: str, dest_dir: Path) -> None:
-    remote = config["remote"]
-    remote_path = config.get("remote_path", "").strip("/")
-    src = f"{remote}:{remote_path}/{relative_key}".replace("\\", "/")
+    src = _rclone_path(config, relative_key)
     proc = subprocess.run(
-        ["rclone", "copy", src, str(dest_dir), "--config", RCLONE_CONFIG_PATH],
-        capture_output=True, text=True, timeout=3600,
+        ["rclone", "copy", src, str(dest_dir), "--config", RCLONE_CONFIG_PATH, *_RCLONE_TRANSFER_FLAGS],
+        capture_output=True, text=True, timeout=TRANSFER_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
         raise RuntimeError(f"rclone copy failed: {proc.stderr.strip() or proc.stdout.strip()}")
