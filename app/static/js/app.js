@@ -120,6 +120,8 @@ function renderJobCard(job) {
   `);
   _wireJobCancelButton(card, job.id);
   _wireJobLogToggle(card, job.id);
+  // On phones the floating tray shows a compact card; tapping the title expands it.
+  card.querySelector(".job-title").addEventListener("click", () => card.classList.toggle("expanded"));
   return card;
 }
 
@@ -269,6 +271,35 @@ function startGlobalJobPoller() {
   setInterval(pollGlobalJobs, 1500);
 }
 
+// ---------- responsive tables ----------
+// On phones every table is rendered as a stack of cards (see style.css).
+// Each cell gets a data-label with its column header so the card can show
+// "Header: value" pairs. Rows are added dynamically (live logs, refreshes),
+// so a MutationObserver keeps the labels in sync.
+function labelResponsiveTables(scope) {
+  scope.querySelectorAll("table").forEach((table) => {
+    const headers = [...table.querySelectorAll(":scope > thead th")].map((th) => th.textContent.trim());
+    if (!headers.length) return;
+    table.classList.add("rtable");
+    table.querySelectorAll(":scope > tbody > tr").forEach((tr) => {
+      let col = 0;
+      [...tr.children].forEach((td) => {
+        if (!td.hasAttribute("data-label")) {
+          td.setAttribute("data-label", td.colSpan > 1 ? "" : (headers[col] || ""));
+          if (td.querySelector(".btn") && !headers[col]) td.classList.add("cell-actions");
+        }
+        col += td.colSpan || 1;
+      });
+    });
+  });
+}
+let _rtablePending = false;
+new MutationObserver(() => {
+  if (_rtablePending) return;
+  _rtablePending = true;
+  requestAnimationFrame(() => { _rtablePending = false; labelResponsiveTables(document); });
+}).observe(document.body, { childList: true, subtree: true });
+
 // ---------- render helpers ----------
 function h(html) {
   const t = document.createElement("template");
@@ -340,7 +371,7 @@ const NAV_ITEMS = [
   { key: "backups", label: "Backups", icon: "⭘" },
   { key: "schedules", label: "Zeitpläne", icon: "⏰" },
   { key: "logs", label: "Logs", icon: "📜" },
-  { key: "settings", label: "Einstellungen", icon: "⚙️" },
+  { key: "settings", label: "Einstellungen", short: "Optionen", icon: "⚙️" },
 ];
 
 function shell(activeKey, contentEl) {
@@ -352,6 +383,17 @@ function shell(activeKey, contentEl) {
         <div class="spacer"></div>
         <div class="user-row" id="user-row"></div>
       </div>
+      <header class="mobile-topbar">
+        <div class="brand">🐳 Backup Manager</div>
+        <div class="mobile-topbar-actions">
+          <button type="button" class="icon-btn" id="m-theme-toggle" title="Dark / Light" aria-label="Farbschema wechseln">🌓</button>
+          <button type="button" class="icon-btn" id="m-user-btn" aria-label="Benutzermenü" aria-expanded="false">👤</button>
+        </div>
+        <div class="mobile-user-menu hidden" id="m-user-menu">
+          <div class="muted" id="m-user-name"></div>
+          <button type="button" class="btn block" id="m-logout-btn">Abmelden</button>
+        </div>
+      </header>
       <div class="main" id="main"></div>
       <nav class="mobile-nav" id="mobile-nav"></nav>
     </div>
@@ -364,7 +406,7 @@ function shell(activeKey, contentEl) {
     navEl.addEventListener("click", () => navigate(item.key));
     nav.appendChild(navEl);
     const mEl = h(`<div class="mobile-nav-item ${item.key === activeKey ? "active" : ""}">
-      <span class="m-icon">${item.icon}</span><span>${item.label}</span></div>`);
+      <span class="m-icon">${item.icon}</span><span class="m-label">${item.short || item.label}</span></div>`);
     mEl.addEventListener("click", () => navigate(item.key));
     mobileNav.appendChild(mEl);
   });
@@ -373,20 +415,37 @@ function shell(activeKey, contentEl) {
   userRow.innerHTML = `${state.user ? escHtml(state.user.username) : ""}${adminBadge} &middot; <a href="#" id="logout-link">Abmelden</a>
     <div style="font-size:10px; color:var(--muted); margin-top:2px; opacity:0.6;">v${state.appVersion || ""}</div>
     <button id="theme-toggle" style="margin-top:8px; width:100%; background:none; border:1px solid var(--border); border-radius:6px; color:var(--text-dim); cursor:pointer; padding:4px 8px; font-size:.75rem;">🌙 Dark / ☀️ Light</button>`;
-  userRow.querySelector("#logout-link").addEventListener("click", async (e) => {
-    e.preventDefault();
+  async function logout(e) {
+    if (e) e.preventDefault();
     await api("/api/auth/logout", { method: "POST" });
     render(loginScreen());
+  }
+  userRow.querySelector("#logout-link").addEventListener("click", logout);
+  wrap.querySelector("#m-logout-btn").addEventListener("click", logout);
+  wrap.querySelector("#m-user-name").innerHTML = `${state.user ? escHtml(state.user.username) : ""}${adminBadge}
+    <div style="font-size:.72rem; margin-top:2px; opacity:.7;">v${state.appVersion || ""}</div>`;
+  const mUserBtn = wrap.querySelector("#m-user-btn");
+  const mUserMenu = wrap.querySelector("#m-user-menu");
+  mUserBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = mUserMenu.classList.toggle("hidden") === false;
+    mUserBtn.setAttribute("aria-expanded", String(open));
+  });
+  wrap.addEventListener("click", (e) => {
+    if (!mUserMenu.contains(e.target) && e.target !== mUserBtn) mUserMenu.classList.add("hidden");
   });
   (function() {
     const saved = localStorage.getItem("dbm-theme");
     if (saved) document.documentElement.dataset.theme = saved;
-    userRow.querySelector("#theme-toggle").addEventListener("click", () => {
-      const cur = document.documentElement.dataset.theme;
+    const toggleTheme = () => {
+      const cur = document.documentElement.dataset.theme
+        || (window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
       const next = (cur === "light") ? "dark" : "light";
       document.documentElement.dataset.theme = next;
       localStorage.setItem("dbm-theme", next);
-    });
+    };
+    userRow.querySelector("#theme-toggle").addEventListener("click", toggleTheme);
+    wrap.querySelector("#m-theme-toggle").addEventListener("click", toggleTheme);
   })();
   wrap.querySelector("#main").appendChild(contentEl);
   return wrap;
@@ -407,6 +466,7 @@ async function navigate(key) {
     else if (key === "logs") content = await logsPage();
     else if (key === "settings") content = await settingsPage();
     render(shell(key, content));
+    window.scrollTo(0, 0);
   } catch (e) {
     if (e.message !== "not authenticated") toast(e.message, "error");
   }
