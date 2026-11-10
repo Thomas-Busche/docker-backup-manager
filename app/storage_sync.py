@@ -27,6 +27,7 @@ Supported target types:
 from __future__ import annotations
 
 import datetime
+from app.clock import utcnow
 import json
 import logging
 import os
@@ -652,7 +653,7 @@ def _sync_to_targets(backup_path: Path, target_ids: Optional[list[int]], on_prog
                 target.last_sync_status = "failed"
                 target.last_sync_error = str(exc)
                 results.append({"target": target.name, "target_id": target.id, "ok": False, "error": str(exc)})
-            target.last_sync_at = datetime.datetime.utcnow()
+            target.last_sync_at = utcnow()
             db.commit()
     finally:
         db.close()

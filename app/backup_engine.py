@@ -20,6 +20,7 @@ Layout of a container backup version folder:
 from __future__ import annotations
 
 import datetime
+from app.clock import utcnow
 import json
 import logging
 import shutil
@@ -99,7 +100,7 @@ class BackupResult:
 
 
 def _timestamp() -> str:
-    return datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return utcnow().strftime("%Y%m%dT%H%M%SZ")
 
 
 def fmtbytes(n: int) -> str:
@@ -567,7 +568,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             "image": image_tag,
             "volumes": volume_names,
             "bind_mounts": bind_mounts_meta,
-            "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "created_at": utcnow().isoformat() + "Z",
             "docker_api_version": client.version().get("ApiVersion"),
             "streamed_target_id": stream_target[2] if stream_target else None,
         }
@@ -703,7 +704,7 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
             "backup_type": "landscape",
             "label": landscape_name,
             "members": member_names,
-            "created_at": datetime.datetime.utcnow().isoformat() + "Z",
+            "created_at": utcnow().isoformat() + "Z",
             "errors": errors,
         }
         (landscape_dir / "meta.json").write_text(json.dumps(meta, indent=2))

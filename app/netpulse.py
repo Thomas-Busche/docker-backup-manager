@@ -19,6 +19,7 @@ Hinweis im Log). Der Schlüssel von NetPulse erlaubt nur diese Aufrufe.
 from __future__ import annotations
 
 import datetime
+from app.clock import utcnow
 import json
 import logging
 import ssl
@@ -152,7 +153,7 @@ def _request(cfg: dict, method: str, path: str, body: Optional[dict] = None) -> 
         _set_error(msg)
         raise NetPulseError(msg) from exc
     with _status_lock:
-        _status["last_ok_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        _status["last_ok_at"] = utcnow().isoformat() + "Z"
         _status["last_error"] = None
     return result
 
@@ -160,7 +161,7 @@ def _request(cfg: dict, method: str, path: str, body: Optional[dict] = None) -> 
 def _set_error(msg: str) -> None:
     with _status_lock:
         _status["last_error"] = msg
-        _status["last_error_at"] = datetime.datetime.utcnow().isoformat() + "Z"
+        _status["last_error_at"] = utcnow().isoformat() + "Z"
 
 
 # ---------- Inventar ----------

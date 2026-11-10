@@ -1,10 +1,11 @@
 import datetime
+from app.clock import utcnow
 
 from app.retention import VersionInfo, versions_to_prune
 
 
 def mk(id_, days_ago):
-    return VersionInfo(id=id_, created_at=datetime.datetime.utcnow() - datetime.timedelta(days=days_ago))
+    return VersionInfo(id=id_, created_at=utcnow() - datetime.timedelta(days=days_ago))
 
 
 def test_no_policy_keeps_everything():

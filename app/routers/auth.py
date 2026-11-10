@@ -1,4 +1,5 @@
 import datetime
+from app.clock import utcnow
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -42,18 +43,25 @@ def setup(payload: SetupPayload, request: Request, db: Session = Depends(get_db)
     return {"ok": True}
 
 
+# Verified against when the username doesn't exist, so a wrong username takes
+# as long as a wrong password and can't be used to discover valid accounts.
+_DUMMY_HASH = hash_password("dbm-timing-equalizer")
+
+
 @router.post("/login")
 def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == payload.username).first()
 
-    if user and user.locked_until and user.locked_until > datetime.datetime.utcnow():
+    if user and user.locked_until and user.locked_until > utcnow():
         raise HTTPException(429, "Too many failed attempts, try again later")
 
+    if not user:
+        verify_password(payload.password, _DUMMY_HASH)
     if not user or not verify_password(payload.password, user.password_hash):
         if user:
             user.failed_attempts += 1
             if user.failed_attempts >= LOGIN_MAX_ATTEMPTS:
-                user.locked_until = datetime.datetime.utcnow() + datetime.timedelta(seconds=LOGIN_LOCKOUT_SECONDS)
+                user.locked_until = utcnow() + datetime.timedelta(seconds=LOGIN_LOCKOUT_SECONDS)
                 user.failed_attempts = 0
             db.commit()
         raise HTTPException(401, "Invalid credentials")
@@ -61,6 +69,8 @@ def login(payload: LoginPayload, request: Request, db: Session = Depends(get_db)
     user.failed_attempts = 0
     user.locked_until = None
     db.commit()
+    # Start from a clean session (no fixation of anything set before login).
+    request.session.clear()
     request.session["user_id"] = user.id
     return {"ok": True}
 
@@ -114,7 +124,7 @@ def list_users(admin: User = Depends(get_admin_user), db: Session = Depends(get_
             "username": u.username,
             "is_admin": u.is_admin,
             "created_at": u.created_at.isoformat() + "Z",
-            "locked": bool(u.locked_until and u.locked_until > datetime.datetime.utcnow()),
+            "locked": bool(u.locked_until and u.locked_until > utcnow()),
         }
         for u in users
     ]}
