@@ -600,6 +600,9 @@ Diese Übersicht bleibt dauerhaft in der Datenbank erhalten — anders als die F
 | `DBM_DEFAULT_RETENTION_COUNT` | `7` | Standard-Anzahl gehaltener Versionen für neue Zeitpläne |
 | `DBM_DEFAULT_RETENTION_DAYS` | `0` | Standard-Altersgrenze in Tagen für neue Zeitpläne (0 = deaktiviert) |
 | `DBM_HELPER_IMAGE` | `alpine:3.20` | Docker-Image für den Backup-Hilfscontainer |
+| `DBM_GZIP_LEVEL` | `6` | gzip-Stufe für lokale Volume-Archive (1 = am schnellsten, 9 = am kleinsten). `1` ist meist 2–3× schneller bei etwas größeren Archiven |
+| `DBM_SYNC_PARALLELISM` | `3` | Wie viele Speicherziele nach einem Backup gleichzeitig befüllt werden |
+| `DBM_TRANSFER_TIMEOUT` | `43200` | Maximale Dauer (Sekunden) einer einzelnen rclone-Übertragung |
 | `DBM_PUBLIC_URL` | — | Externe URL der App (z. B. `http://192.168.1.10:8420`), benötigt für OAuth-Rücksprungadressen. Kann alternativ im Einrichtungs-Assistenten gesetzt werden. |
 | `DBM_GOOGLE_CLIENT_ID` | — | Google OAuth Client-ID (für Google Drive). Kann alternativ im Einrichtungs-Assistenten gesetzt werden. |
 | `DBM_GOOGLE_CLIENT_SECRET` | — | Google OAuth Client-Secret (für Google Drive). Kann alternativ im Einrichtungs-Assistenten gesetzt werden. |

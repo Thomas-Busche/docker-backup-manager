@@ -126,11 +126,12 @@ def add_log(job_id: str, message: str) -> None:
     import datetime
     import pytz
     from app.config import TZ_NAME
+    from app.clock import utcnow
     try:
         tz = pytz.timezone(TZ_NAME)
         ts = datetime.datetime.now(tz).strftime("%H:%M:%S")
     except Exception:
-        ts = datetime.datetime.utcnow().strftime("%H:%M:%S")
+        ts = utcnow().strftime("%H:%M:%S")
     with _lock:
         if job_id not in _jobs:
             return

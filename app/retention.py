@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime
+from app.clock import utcnow
 from dataclasses import dataclass
 
 
@@ -34,7 +35,7 @@ def versions_to_prune(versions: list[VersionInfo], retention_count: int = 0,
         keep_ids.update(v.id for v in ordered)
 
     if retention_days and retention_days > 0:
-        cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=retention_days)
+        cutoff = utcnow() - datetime.timedelta(days=retention_days)
         keep_ids = {vid for vid in keep_ids if _lookup(ordered, vid).created_at >= cutoff} | {ordered[0].id}
 
     return [v for v in ordered if v.id not in keep_ids]

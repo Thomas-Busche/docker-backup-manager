@@ -37,7 +37,9 @@ def test_list_backups_removes_ok_records_whose_directory_is_gone_but_keeps_faile
         all_ids = {v["id"] for versions in groups.values() for v in versions}
         assert ok_present_id in all_ids
         assert ok_missing_id not in all_ids  # stale "ok" record with no directory - self-healed away
-        assert failed_missing_id in all_ids  # failed records are expected to have no directory - kept
+        # Failed records are hidden from the overview (they have nothing to restore),
+        # but must not be self-healed away: the DB check below still requires them.
+        assert failed_missing_id not in all_ids
 
     db = SessionLocal()
     try:

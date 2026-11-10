@@ -1,6 +1,7 @@
 """Persistent event log for the log overview page - unlike job_tracker (in-memory,
 lost on restart), these rows survive app restarts so past activity stays visible."""
 import datetime
+from app.clock import utcnow
 import logging
 import os
 
@@ -64,7 +65,7 @@ def purge_old_entries(retention_days: int) -> int:
     """Delete log entries older than retention_days. Returns number of deleted rows."""
     if retention_days <= 0:
         return 0
-    cutoff = datetime.datetime.utcnow() - datetime.timedelta(days=retention_days)
+    cutoff = utcnow() - datetime.timedelta(days=retention_days)
     db = SessionLocal()
     try:
         deleted = db.query(LogEntry).filter(LogEntry.created_at < cutoff).delete()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from app.clock import utcnow
 import json
 import logging
 from pathlib import Path
@@ -143,14 +144,14 @@ def run_schedule(schedule_id: int):
 
             _apply_retention(db, sched)
 
-            sched.last_run_at = datetime.datetime.utcnow()
+            sched.last_run_at = utcnow()
             sched.last_status = "cancelled" if result.cancelled else ("ok" if result.ok else "failed")
             db.commit()
         except Exception as exc:  # noqa: BLE001
             logger.exception("Scheduled backup failed")
             job_tracker.finish_job(job.id, False, str(exc))
             event_log.log_event("schedule", f'Zeitplan "{sched.name}" fehlgeschlagen: {exc}', level="error")
-            sched.last_run_at = datetime.datetime.utcnow()
+            sched.last_run_at = utcnow()
             sched.last_status = "failed"
             db.commit()
     finally:

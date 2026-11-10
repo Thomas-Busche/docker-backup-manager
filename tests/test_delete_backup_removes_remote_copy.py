@@ -1,6 +1,16 @@
 import json
+import time
 
 from fastapi.testclient import TestClient
+
+
+def _wait_until_gone(path, timeout=5.0):
+    # Remote cleanup runs in a background thread so the UI answers immediately -
+    # give it a moment to finish instead of asserting right after the request.
+    deadline = time.monotonic() + timeout
+    while path.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return not path.exists()
 
 
 def test_deleting_a_backup_also_removes_it_from_synced_storage_targets(tmp_path):
@@ -48,7 +58,7 @@ def test_deleting_a_backup_also_removes_it_from_synced_storage_targets(tmp_path)
         assert resp.status_code == 200
         assert "warning" not in resp.json()
 
-    assert not remote_copy.exists()
+    assert _wait_until_gone(remote_copy)
     assert not backup_dir.exists()
 
 
@@ -101,5 +111,5 @@ def test_deleting_a_backup_also_removes_streamed_volume_data(tmp_path):
         assert resp.status_code == 200
         assert "warning" not in resp.json()
 
-    assert not remote_volume_copy.exists()
+    assert _wait_until_gone(remote_volume_copy)
     assert not backup_dir.exists()

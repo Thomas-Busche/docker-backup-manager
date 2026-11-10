@@ -61,7 +61,7 @@ def create_schedule(payload: SchedulePayload, db: Session = Depends(get_db), use
     if payload.target_type == "container" and not payload.target_ref:
         raise HTTPException(400, "target_ref (container name) is required for target_type=container")
 
-    data = payload.dict()
+    data = payload.model_dump()
     target_ids = data.pop("storage_target_ids")
     sched = Schedule(storage_target_ids=json.dumps(target_ids), **data)
     db.add(sched)
@@ -80,7 +80,7 @@ def update_schedule(schedule_id: int, payload: SchedulePayload, db: Session = De
         raise HTTPException(404, "Schedule not found")
     _validate_cron(payload.cron_expression)
 
-    data = payload.dict()
+    data = payload.model_dump()
     target_ids = data.pop("storage_target_ids")
     for k, v in data.items():
         setattr(sched, k, v)

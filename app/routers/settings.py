@@ -1,4 +1,5 @@
 import datetime
+from app.clock import utcnow
 import json
 import os
 import shutil
@@ -108,7 +109,7 @@ def check_for_update(user: User = Depends(get_current_user)):
     with _update_lock:
         cached = _update_cache.get("result")
         fetched_at = _update_cache.get("fetched_at")
-        if cached and fetched_at and (datetime.datetime.utcnow() - fetched_at).total_seconds() < 3600:
+        if cached and fetched_at and (utcnow() - fetched_at).total_seconds() < 3600:
             return cached
 
     try:
@@ -138,7 +139,7 @@ def check_for_update(user: User = Depends(get_current_user)):
 
     with _update_lock:
         _update_cache["result"] = result
-        _update_cache["fetched_at"] = datetime.datetime.utcnow()
+        _update_cache["fetched_at"] = utcnow()
     return result
 
 
@@ -175,7 +176,9 @@ def apply_update(user: User = Depends(get_admin_user)):
                     if not (rel.startswith("app/") or rel == "requirements.txt"):
                         continue
                     dest = (update_stage / rel).resolve()
-                    if not str(dest).startswith(str(update_stage.resolve())):
+                    # is_relative_to, not a string prefix check: "/data/.app_update_x"
+                    # starts with "/data/.app_update" but is outside the stage dir.
+                    if not dest.is_relative_to(update_stage.resolve()):
                         continue  # skip path-traversal attempts
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     if member.isfile():
@@ -547,7 +550,7 @@ def export_config(db: Session = Depends(get_db), user: User = Depends(get_admin_
 
     payload = {
         "dbm_config_version": 1,
-        "exported_at": datetime.datetime.utcnow().isoformat() + "Z",
+        "exported_at": utcnow().isoformat() + "Z",
         "app_version": APP_VERSION,
         "storage_targets": [
             {
@@ -582,7 +585,7 @@ def export_config(db: Session = Depends(get_db), user: User = Depends(get_admin_
             } for u in users
         ],
     }
-    filename = f"dbm-config-{datetime.datetime.utcnow().strftime('%Y%m%d-%H%M%S')}.json"
+    filename = f"dbm-config-{utcnow().strftime('%Y%m%d-%H%M%S')}.json"
     return JSONResponse(
         content=payload,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},

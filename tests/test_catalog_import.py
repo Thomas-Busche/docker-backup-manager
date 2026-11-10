@@ -44,7 +44,7 @@ def test_import_catalog_creates_records_and_skips_duplicates_on_rerun(tmp_path):
 
         # Running it again must not create duplicates.
         resp2 = client.post(f"/api/settings/storage-targets/{target_id}/import-catalog")
-        assert resp2.json() == {"found": 2, "imported": 0, "skipped": 2}
+        assert resp2.json() == {"found": 2, "imported": 0, "updated": 0, "skipped": 2}
 
     db = SessionLocal()
     try:

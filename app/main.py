@@ -1,9 +1,10 @@
 import logging
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -29,7 +30,17 @@ _dbm_logger.propagate = False
 
 STATIC_DIR = Path(__file__).parent / "static"
 
-app = FastAPI(title="Docker Backup Manager")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    init_db()
+    scheduler.start()
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+
+
+app = FastAPI(title="Docker Backup Manager", lifespan=lifespan)
 
 app.add_middleware(
     SessionMiddleware,
@@ -52,12 +63,29 @@ app.include_router(netpulse.router)
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
 
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
 @app.middleware("http")
-async def no_stale_assets(request, call_next):
-    # Nach einem Update sofort die neue Oberfläche: der Browser fragt jedes Mal kurz nach (sonst 304)
+async def security_and_cache_headers(request, call_next):
+    # CSRF: the session cookie is SameSite=Lax, which still lets *same-site*
+    # pages (e.g. another web app on the same NAS, different port) send it
+    # along. Browsers label every request with Sec-Fetch-Site; anything that
+    # changes state must come from this app's own origin. Requests without
+    # the header (curl, scripts, old browsers) are not affected.
+    if (request.url.path.startswith("/api/") and request.method in _UNSAFE_METHODS
+            and request.headers.get("sec-fetch-site") in ("cross-site", "same-site")):
+        return JSONResponse({"detail": "Cross-site request blocked"}, status_code=403)
+
     response = await call_next(request)
     if not request.url.path.startswith("/api/"):
+        # Nach einem Update sofort die neue Oberfläche: der Browser fragt jedes Mal kurz nach (sonst 304)
         response.headers.setdefault("Cache-Control", "no-cache")
+    else:
+        response.headers.setdefault("Cache-Control", "no-store")
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
     return response
 
 
@@ -77,12 +105,3 @@ def spa(full_path: str):
     return HTMLResponse(_INDEX_HTML)
 
 
-@app.on_event("startup")
-def on_startup():
-    init_db()
-    scheduler.start()
-
-
-@app.on_event("shutdown")
-def on_shutdown():
-    scheduler.shutdown()

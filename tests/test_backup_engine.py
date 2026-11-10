@@ -286,7 +286,7 @@ def test_backup_container_archives_bind_mounts_and_skips_denylisted_ones(tmp_pat
     meta = json.loads((result.path / "meta.json").read_text())
     assert meta["bind_mounts"] == [{
         "source": "/mnt/bigdisk/nextcloud-data", "destination": "/var/www/html/data",
-        "filename": "_var_www_html_data.tar.gz", "rw": True,
+        "filename": "_var_www_html_data.tar.gz", "rw": True, "is_file": False,
     }]
     # The docker.sock bind mount must not show up anywhere - not archived, not in meta.
     assert (result.path / "binds" / "_var_www_html_data.tar.gz").read_bytes() == b"data-for-/mnt/bigdisk/nextcloud-data"
@@ -327,7 +327,7 @@ def test_list_landscape_containers_name_contains_is_case_insensitive(monkeypatch
 
 def test_backup_landscape_uses_name_contains_as_fallback_label(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(backup_engine, "list_landscape_containers",
-                         lambda project_filter=None, name_contains=None: [])
+                         lambda project_filter=None, name_contains=None, exclude_names=None: [])
     result = backup_engine.backup_landscape(dest_root=tmp_path, name_contains="nextcloud-aio")
     assert result.name == "nextcloud-aio"
     assert (tmp_path / "_landscapes" / "nextcloud-aio").exists()
@@ -377,7 +377,7 @@ def test_backup_landscape_stops_after_a_cancelled_member(tmp_path: Path, monkeyp
     container_b = MagicMock(name="b")
     container_b.name = "app-b"
     monkeypatch.setattr(backup_engine, "list_landscape_containers",
-                         lambda project_filter=None, name_contains=None: [container_a, container_b])
+                         lambda project_filter=None, name_contains=None, exclude_names=None: [container_a, container_b])
 
     cancelled_result = BackupResult(ok=False, name="app-a", path=tmp_path / "app-a" / "v1",
                                      error="Backup abgebrochen", cancelled=True)
@@ -402,7 +402,7 @@ def test_backup_landscape_passes_stop_containers_to_each_member(tmp_path: Path, 
     container_b = MagicMock(name="b")
     container_b.name = "app-b"
     monkeypatch.setattr(backup_engine, "list_landscape_containers",
-                         lambda project_filter=None, name_contains=None: [container_a, container_b])
+                         lambda project_filter=None, name_contains=None, exclude_names=None: [container_a, container_b])
 
     captured = []
 
@@ -423,7 +423,7 @@ def test_backup_landscape_carries_member_results_for_tracking(tmp_path: Path, mo
     container_b = MagicMock(name="b")
     container_b.name = "app-b"
     monkeypatch.setattr(backup_engine, "list_landscape_containers",
-                         lambda project_filter=None, name_contains=None: [container_a, container_b])
+                         lambda project_filter=None, name_contains=None, exclude_names=None: [container_a, container_b])
 
     canned_results = {
         "app-a": BackupResult(ok=True, name="app-a", path=tmp_path / "app-a" / "v1", size_bytes=123),
