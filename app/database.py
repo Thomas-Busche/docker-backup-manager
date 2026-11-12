@@ -1,9 +1,32 @@
-from sqlalchemy import create_engine, inspect, text
+import logging
+import os
+
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 from app.config import DB_PATH
 
+logger = logging.getLogger("dbm.database")
+
+# WAL lets the many small log writes from background threads run alongside UI reads.
+# WAL does not work on network file systems (NFS/SMB) - set DBM_DB_WAL=0 if /data lives on one.
+_USE_WAL = os.environ.get("DBM_DB_WAL", "1").strip().lower() not in ("0", "false", "no", "off")
+
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+
+
+@event.listens_for(engine, "connect")
+def _sqlite_pragmas(dbapi_conn, _record):
+    cur = dbapi_conn.cursor()
+    try:
+        if _USE_WAL:
+            cur.execute("PRAGMA journal_mode=WAL")
+            # NORMAL is safe in WAL mode (no corruption, at most the last commit is lost on power loss)
+            cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cur.close()
+
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
@@ -49,10 +72,71 @@ def _add_missing_columns():
                 conn.execute(text("ALTER TABLE backup_records ADD COLUMN streamed_target_id INTEGER"))
 
 
+def _pragma(conn, name: str):
+    return conn.exec_driver_sql(f"PRAGMA {name}").scalar()
+
+
+def _ensure_incremental_auto_vacuum():
+    """Switches the DB to auto_vacuum=INCREMENTAL so pages freed by deletes can be handed
+    back to the file system. For an existing DB the mode only takes effect after a full
+    VACUUM, which is done once here (on a fresh DB it is a no-op)."""
+    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+        if _pragma(conn, "auto_vacuum") == 2:  # 2 = INCREMENTAL
+            return
+        conn.exec_driver_sql("PRAGMA auto_vacuum=INCREMENTAL")
+        conn.exec_driver_sql("VACUUM")
+    # Pooled connections opened before the VACUUM still report the old mode - drop them
+    engine.dispose()
+    logger.info("Datenbank auf automatische Platzfreigabe umgestellt (einmalig)")
+
+
+def db_file_size() -> int:
+    """Size of the SQLite DB on disk incl. WAL/SHM side files, in bytes."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        try:
+            total += os.path.getsize(f"{DB_PATH}{suffix}")
+        except OSError:
+            pass
+    return total
+
+
+def compact_db(full: bool = False) -> dict:
+    """Gives free pages back to the file system and empties the WAL file.
+    full=True runs a complete VACUUM (rewrites the file, also defragments) -
+    otherwise only an incremental vacuum, which is cheap enough to run every night."""
+    before = db_file_size()
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            # Raw DB-API cursor: incremental_vacuum frees pages step by step, so the
+            # statement has to be stepped to the end (fetchall), which SQLAlchemy's
+            # result wrapper refuses for statements without result columns.
+            cur = conn.connection.dbapi_connection.cursor()
+            try:
+                if full:
+                    cur.execute("VACUUM")
+                else:
+                    cur.execute("PRAGMA incremental_vacuum")
+                    cur.fetchall()
+                if _USE_WAL:
+                    cur.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                    cur.fetchall()
+            finally:
+                cur.close()
+    except Exception:  # noqa: BLE001
+        logger.exception("Datenbank-Komprimierung fehlgeschlagen")
+    after = db_file_size()
+    return {"size_before": before, "size_after": after}
+
+
 def init_db():
     from app import models  # noqa: F401  (ensure models are registered)
     Base.metadata.create_all(bind=engine)
     _add_missing_columns()
+    try:
+        _ensure_incremental_auto_vacuum()
+    except Exception:  # noqa: BLE001
+        logger.exception("Umstellung auf auto_vacuum fehlgeschlagen - Datenbank wird trotzdem verwendet")
 
 
 def get_db():

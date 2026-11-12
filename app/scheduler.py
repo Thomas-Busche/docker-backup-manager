@@ -245,9 +245,12 @@ def load_all_schedules():
 
 
 def _purge_old_logs():
-    deleted = event_log.purge_old_entries(event_log.DEFAULT_LOG_RETENTION_DAYS)
-    if deleted:
-        logger.info("Log-Rotation: %d alte Einträge gelöscht", deleted)
+    # Sunday night: full VACUUM (rewrites/defragments the file), otherwise the cheap incremental one
+    full = datetime.datetime.now(datetime.timezone.utc).weekday() == 6
+    result = event_log.run_rotation(full_vacuum=full)
+    if result["deleted"] or result["size_after"] < result["size_before"]:
+        logger.info("Log-Rotation: %d alte Einträge gelöscht, Datenbank %.1f MB → %.1f MB",
+                    result["deleted"], result["size_before"] / 1e6, result["size_after"] / 1e6)
 
 
 def start():

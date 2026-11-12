@@ -1406,6 +1406,7 @@ const LOG_CATEGORY_LABEL = {
   cleanup:   "Bereinigung",
   restic:    "Restic",
   space:     "Speicher",
+  database:  "Datenbank",
 };
 
 const LOG_CATEGORY_COLOR = {
@@ -1416,7 +1417,15 @@ const LOG_CATEGORY_COLOR = {
   cleanup:   "#f59e0b",
   restic:    "#10b981",
   space:     "#6366f1",
+  database:  "#64748b",
 };
+
+function logRetentionLabel(st) {
+  const parts = [];
+  if (st.retention_days > 0) parts.push(`${st.retention_days} Tage`);
+  if (st.max_entries > 0) parts.push(`max. ${Number(st.max_entries).toLocaleString("de-DE")} Einträge`);
+  return parts.length ? parts.join(", ") : "unbegrenzt";
+}
 
 function logCategoryBadge(cat) {
   const label = LOG_CATEGORY_LABEL[cat] || cat;
@@ -1433,7 +1442,7 @@ function logLevelBadge(level) {
 async function logsPage() {
   const [data, settings] = await Promise.all([
     api("/api/logs?limit=2000").catch((e) => { toast(e.message, "error"); return { entries: [], total: 0 }; }),
-    api("/api/logs/settings").catch(() => ({ retention_days: 90 })),
+    api("/api/logs/settings").catch(() => ({ retention_days: 90, max_entries: 50000, db_size_bytes: null })),
   ]);
 
   const catsPresent = [...new Set(data.entries.map((e) => e.category))].sort();
@@ -1448,9 +1457,10 @@ async function logsPage() {
       <h2>Logs</h2>
       <div class="actions">
         <span class="muted" style="font-size:.82rem;" id="log-count">${data.total} Einträge gesamt</span>
+        ${settings.db_size_bytes != null ? `<span class="muted" style="font-size:.82rem;" title="Größe der Datenbankdatei auf der Festplatte">Datenbank: ${fmtBytes(settings.db_size_bytes)}</span>` : ""}
         <button class="btn" id="live-btn" title="Neue Einträge alle 3 s automatisch laden">▶ Live</button>
-        <button class="btn" id="log-settings-btn" style="font-size:.82rem;">Aufbewahrung: ${settings.retention_days > 0 ? settings.retention_days + " Tage" : "unbegrenzt"}</button>
-        <button class="btn danger" id="log-purge-btn" style="font-size:.82rem;">Jetzt bereinigen</button>
+        <button class="btn" id="log-settings-btn" style="font-size:.82rem;">Aufbewahrung: ${logRetentionLabel(settings)}</button>
+        <button class="btn danger" id="log-purge-btn" style="font-size:.82rem;" title="Alte Einträge löschen und die Datenbankdatei verkleinern">Jetzt bereinigen</button>
       </div>
     </div>
 
@@ -1583,21 +1593,43 @@ async function logsPage() {
     });
   });
 
-  wrap.querySelector("#log-settings-btn").addEventListener("click", async () => {
-    const input = prompt(`Log-Aufbewahrung in Tagen (0 = unbegrenzt):`, settings.retention_days);
-    if (input === null) return;
-    const days = parseInt(input, 10);
-    if (isNaN(days) || days < 0) { toast("Ungültige Eingabe", "error"); return; }
-    await api("/api/logs/settings", { method: "PUT", body: JSON.stringify({ retention_days: days }) });
-    toast(`Aufbewahrung auf ${days > 0 ? days + " Tage" : "unbegrenzt"} gesetzt`);
-    navigate("logs");
+  wrap.querySelector("#log-settings-btn").addEventListener("click", () => {
+    const overlay = h(`
+      <div class="modal-overlay">
+        <div class="modal">
+          <h3>Log-Aufbewahrung</h3>
+          <div class="field"><label>Einträge löschen nach (Tage, 0 = nie)</label>
+            <input type="number" min="0" id="log-ret-days" value="${settings.retention_days}" /></div>
+          <div class="field"><label>Höchstens so viele Einträge behalten (0 = unbegrenzt)</label>
+            <input type="number" min="0" step="1000" id="log-max-entries" value="${settings.max_entries}" />
+            <div class="muted" style="font-size:.75rem; margin-top:4px;">
+              Ältere Einträge werden jede Nacht um 03:30 gelöscht, danach wird die Datenbank verkleinert.
+            </div></div>
+          <div class="row-actions">
+            <button class="btn" id="log-cancel-btn">Abbrechen</button>
+            <button class="btn primary" id="log-save-btn">Speichern</button>
+          </div>
+        </div>
+      </div>`);
+    overlay.querySelector("#log-cancel-btn").addEventListener("click", () => overlay.remove());
+    overlay.querySelector("#log-save-btn").addEventListener("click", async () => {
+      const days = parseInt(overlay.querySelector("#log-ret-days").value, 10);
+      const maxEntries = parseInt(overlay.querySelector("#log-max-entries").value, 10);
+      if (isNaN(days) || days < 0 || isNaN(maxEntries) || maxEntries < 0) { toast("Ungültige Eingabe", "error"); return; }
+      try {
+        const res = await api("/api/logs/settings", { method: "PUT", body: JSON.stringify({ retention_days: days, max_entries: maxEntries }) });
+        overlay.remove();
+        toast(`Aufbewahrung: ${logRetentionLabel(res)}`);
+        navigate("logs");
+      } catch (e) { toast(e.message, "error"); }
+    });
+    document.body.appendChild(overlay);
   });
 
   wrap.querySelector("#log-purge-btn").addEventListener("click", async () => {
-    if (settings.retention_days <= 0) { toast("Aufbewahrung ist unbegrenzt — zuerst Tage einstellen", "error"); return; }
-    if (!confirm(`Alle Log-Einträge älter als ${settings.retention_days} Tage löschen?`)) return;
+    if (!confirm(`Einträge außerhalb der Aufbewahrung (${logRetentionLabel(settings)}) löschen und die Datenbank verkleinern?`)) return;
     const res = await api("/api/logs/purge", { method: "POST" });
-    toast(`${res.deleted} Einträge gelöscht`);
+    toast(`${res.deleted} Einträge gelöscht, Datenbank ${fmtBytes(res.size_before)} → ${fmtBytes(res.size_after)}`);
     navigate("logs");
   });
 

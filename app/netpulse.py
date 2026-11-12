@@ -241,17 +241,35 @@ def inventory() -> list[dict]:
     return out
 
 
+# Last inventory-push problem that was written to the log. The push runs every hour, so an
+# unreachable NetPulse would otherwise add the same warning 24 times a day to the database.
+_inventory_last_problem: Optional[str] = None
+
+
+def _inventory_problem(msg: str) -> None:
+    global _inventory_last_problem
+    if msg != _inventory_last_problem:
+        logger.warning("%s (weitere gleiche Meldungen werden bis zur Besserung unterdrückt)", msg)
+    _inventory_last_problem = msg
+
+
 def push_inventory(cfg: Optional[dict] = None) -> Optional[dict]:
+    global _inventory_last_problem
     cfg = cfg or get_config()
     if not _active(cfg):
         return None
     try:
-        return _request(cfg, "PUT", "/inventory", {"subjects": inventory()})
+        result = _request(cfg, "PUT", "/inventory", {"subjects": inventory()})
     except NetPulseError as exc:
-        logger.warning("NetPulse: Containerliste nicht übertragen - %s", exc)
+        _inventory_problem(f"NetPulse: Containerliste nicht übertragen - {exc}")
+        return None
     except Exception as exc:  # noqa: BLE001
-        logger.warning("NetPulse: Containerliste nicht ermittelt - %s", exc)
-    return None
+        _inventory_problem(f"NetPulse: Containerliste nicht ermittelt - {exc}")
+        return None
+    if _inventory_last_problem is not None:
+        logger.info("NetPulse: Containerliste wird wieder übertragen")
+        _inventory_last_problem = None
+    return result
 
 
 def push_inventory_async() -> None:

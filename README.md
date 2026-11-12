@@ -332,6 +332,8 @@ Unter **Zeitpläne** lassen sich automatische Backups einrichten:
 
 **Aufbewahrung:** Werden beim Prüfen der Aufbewahrungsregel Versionen gelöscht, werden automatisch auch die Offsite-Kopien auf allen Speicherzielen entfernt. Bei Landscape-Backups werden auch die Mitglieds-Container-Backups mit bereinigt.
 
+**Log und Datenbankgröße:** Unter **Logs → Aufbewahrung** lässt sich einstellen, wie lange (Standard 90 Tage) und wie viele Einträge (Standard 50.000) das Log behält. Die Einstellung wird gespeichert und überlebt Neustarts. Jede Nacht um 03:30 werden ältere Einträge gelöscht und die Datenbankdatei verkleinert (sonntags vollständig per `VACUUM`). „Jetzt bereinigen“ macht beides sofort, die aktuelle Dateigröße steht oben auf der Logs-Seite. Startwerte ohne gespeicherte Einstellung: `DBM_LOG_RETENTION_DAYS`, `DBM_LOG_MAX_ENTRIES` (0 = unbegrenzt). Die Datenbank läuft im WAL-Modus. Liegt `/data` auf einem Netzlaufwerk (NFS/SMB), `DBM_DB_WAL=0` setzen.
+
 ---
 
 ## Wiederherstellen

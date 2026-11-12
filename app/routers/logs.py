@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -27,25 +29,27 @@ def list_logs(limit: int = 200, since_id: int = 0, user: User = Depends(get_curr
 
 @router.get("/settings")
 def get_log_settings(user: User = Depends(get_current_user)):
-    return {"retention_days": event_log.DEFAULT_LOG_RETENTION_DAYS}
+    from app.database import db_file_size
+    return {**event_log.get_settings(), "db_size_bytes": db_file_size(), "total": event_log.count_entries()}
 
 
 class LogSettingsPayload(BaseModel):
     retention_days: int
+    max_entries: Optional[int] = None
 
 
 @router.put("/settings")
 def update_log_settings(payload: LogSettingsPayload, user: User = Depends(get_current_user)):
     if payload.retention_days < 0:
         raise HTTPException(400, "retention_days muss 0 (unbegrenzt) oder größer sein")
-    event_log.DEFAULT_LOG_RETENTION_DAYS = payload.retention_days
-    return {"ok": True, "retention_days": payload.retention_days}
+    if payload.max_entries is not None and payload.max_entries < 0:
+        raise HTTPException(400, "max_entries muss 0 (unbegrenzt) oder größer sein")
+    max_entries = payload.max_entries if payload.max_entries is not None else event_log.get_settings()["max_entries"]
+    saved = event_log.save_settings(payload.retention_days, max_entries)
+    return {"ok": True, **saved}
 
 
 @router.post("/purge")
 def purge_logs(user: User = Depends(get_current_user)):
-    days = event_log.DEFAULT_LOG_RETENTION_DAYS
-    if days <= 0:
-        raise HTTPException(400, "Log-Aufbewahrung ist auf unbegrenzt gesetzt — nichts zu löschen.")
-    deleted = event_log.purge_old_entries(days)
-    return {"deleted": deleted, "retention_days": days}
+    """Apply the retention limits now and compact the database file (full VACUUM)."""
+    return event_log.run_rotation(full_vacuum=True)
