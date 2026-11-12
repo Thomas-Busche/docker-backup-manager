@@ -790,7 +790,9 @@ def _rclone_about(rclone_target: str, rclone_conf_path: str) -> dict:
         total = data.get("total")
         used = data.get("used")
         free = data.get("free") or (total - used if total and used else None)
-        _space_logger.info("rclone about %s: total=%s used=%s free=%s", rclone_target, total, used, free)
+        # debug only: the dashboard asks for this on every page load - INFO would put a row
+        # into the persistent log each time and make the database grow for no benefit
+        _space_logger.debug("rclone about %s: total=%s used=%s free=%s", rclone_target, total, used, free)
         return {"total_bytes": total, "used_bytes": used, "free_bytes": free}
     except Exception as exc:
         _space_logger.warning("rclone about %s exception: %s", rclone_target, exc)
