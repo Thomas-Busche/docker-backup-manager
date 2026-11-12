@@ -16,7 +16,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import encryption, oauth_storage, storage_sync
+from app import encryption, oauth_storage, rclone_backends, storage_sync
 from app.auth import get_admin_user, get_current_user
 from app.config import APP_VERSION, BACKUPS_DIR, DEFAULT_RETENTION_COUNT, DEFAULT_RETENTION_DAYS, GITHUB_REPO, SESSION_MAX_AGE, TZ_ERROR, TZ_NAME
 from app.database import get_db
@@ -200,7 +200,7 @@ def apply_update(user: User = Depends(get_admin_user)):
 
 class StorageTargetPayload(BaseModel):
     name: str
-    type: str  # "local_path" | "s3" | "rclone"
+    type: str  # see VALID_TARGET_TYPES
     config: dict
     enabled: bool = True
 
@@ -208,14 +208,52 @@ class StorageTargetPayload(BaseModel):
 _REDACT_FIELDS: dict[str, list[str]] = {
     "smb": ["password"],
     "s3": ["secret_key"],
+    **rclone_backends.SECRET_FIELDS,
 }
+
+_REDACTED = "***"
+
+VALID_TARGET_TYPES = ("local_path", "smb", "s3", "rclone", "google_drive", "onedrive",
+                      *rclone_backends.TARGET_TYPES)
+
+
+def _merge_secrets(target_type: str, stored: dict, incoming: dict) -> dict:
+    """The browser only ever sees secrets as "***" (or not at all). When it
+    sends a config back unchanged, keep the stored secret instead of saving
+    the literal "***" - which used to break an SMB/S3 target on every edit."""
+    config = dict(incoming)
+    for field in _REDACT_FIELDS.get(target_type, []):
+        if config.get(field) == _REDACTED or (field not in config and field in stored):
+            if field in stored:
+                config[field] = stored[field]
+            else:
+                config.pop(field, None)
+    return config
+
+
+def _resolve_dropbox_sign_in(config: dict) -> dict:
+    """Swaps a finished Dropbox sign-in (pending_id) for its refresh token."""
+    config = dict(config)
+    pending_id = config.pop("pending_id", None)
+    config.pop("connected", None)
+    if pending_id:
+        try:
+            data = rclone_backends.dropbox_pop_pending(pending_id, (config.get("app_key") or "").strip())
+        except rclone_backends.ConfigError as exc:
+            raise HTTPException(400, str(exc))
+        config["refresh_token"] = data["refresh_token"]
+        config["account"] = data["account"]
+    return config
 
 
 def _target_config_for_response(target_type: str, config: dict) -> dict:
     config = dict(config)
     for field in _REDACT_FIELDS.get(target_type, []):
-        if field in config:
-            config[field] = "***"
+        if config.get(field):  # empty stays empty, so the form doesn't show "***" for an unset key
+            config[field] = _REDACTED
+    if target_type == "dropbox":
+        config["connected"] = bool(config.get("refresh_token"))
+        config.pop("refresh_token", None)
     if target_type in ("google_drive", "onedrive"):
         config = {**config, "connected": bool(config.get("refresh_token"))}
         config.pop("refresh_token", None)
@@ -250,10 +288,13 @@ def list_targets(db: Session = Depends(get_db), user: User = Depends(get_admin_u
 @router.post("/storage-targets")
 def create_target(payload: StorageTargetPayload, db: Session = Depends(get_db),
                    user: User = Depends(get_admin_user)):
-    if payload.type not in ("local_path", "smb", "s3", "rclone", "google_drive", "onedrive"):
+    if payload.type not in VALID_TARGET_TYPES:
         raise HTTPException(400, "Invalid target type")
+    config = payload.config
+    if payload.type == "dropbox":
+        config = _resolve_dropbox_sign_in(config)
     target = StorageTarget(
-        name=payload.name, type=payload.type, config_json=json.dumps(payload.config), enabled=payload.enabled,
+        name=payload.name, type=payload.type, config_json=json.dumps(config), enabled=payload.enabled,
     )
     db.add(target)
     db.commit()
@@ -267,7 +308,13 @@ def update_target(target_id: int, payload: StorageTargetPayload, db: Session = D
     target = db.query(StorageTarget).filter(StorageTarget.id == target_id).first()
     if not target:
         raise HTTPException(404, "Storage target not found")
+    if payload.type not in VALID_TARGET_TYPES:
+        raise HTTPException(400, "Invalid target type")
     config = payload.config
+    if target.type == payload.type:
+        config = _merge_secrets(payload.type, json.loads(target.config_json), config)
+    if payload.type == "dropbox":
+        config = _resolve_dropbox_sign_in(config)
     if target.type in ("google_drive", "onedrive") and target.type == payload.type:
         # The frontend never receives the refresh_token back (see
         # _target_config_for_response), so a naive overwrite here would erase
@@ -296,17 +343,64 @@ def delete_target(target_id: int, db: Session = Depends(get_db), user: User = De
 class StorageTargetTestPayload(BaseModel):
     type: str
     config: dict
+    target_id: Optional[int] = None  # editing an existing target: fill in its stored secrets
 
 
 @router.post("/storage-targets/test")
-def test_storage_target_config(payload: StorageTargetTestPayload, user: User = Depends(get_admin_user)):
+def test_storage_target_config(payload: StorageTargetTestPayload, db: Session = Depends(get_db),
+                               user: User = Depends(get_admin_user)):
     """Tests connection settings before a target has been saved, so mistakes
     (wrong share name, bad credentials, ...) surface immediately in the dialog."""
+    config = payload.config
+    if payload.target_id is not None:
+        target = db.query(StorageTarget).filter(StorageTarget.id == payload.target_id).first()
+        if target and target.type == payload.type:
+            config = _merge_secrets(payload.type, json.loads(target.config_json), config)
+    if payload.type == "dropbox" and config.get("pending_id"):
+        # Not saved yet: peek at the parked sign-in without consuming it.
+        pending = rclone_backends._dropbox_pending.get(config["pending_id"])
+        if pending:
+            config = {**config, "refresh_token": pending["refresh_token"]}
     try:
-        storage_sync.check_target_connection(payload.type, json.dumps(payload.config))
+        storage_sync.check_target_connection(payload.type, json.dumps(config))
         return {"ok": True}
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(400, f"Connection test failed: {exc}")
+
+
+class DropboxAuthUrlPayload(BaseModel):
+    app_key: str
+
+
+@router.post("/dropbox/auth-url")
+def dropbox_auth_url(payload: DropboxAuthUrlPayload, user: User = Depends(get_admin_user)):
+    try:
+        return {"url": rclone_backends.dropbox_auth_url(payload.app_key)}
+    except rclone_backends.ConfigError as exc:
+        raise HTTPException(400, str(exc))
+
+
+class DropboxExchangePayload(BaseModel):
+    app_key: str
+    app_secret: str = ""
+    code: str
+    target_id: Optional[int] = None  # reconnecting: use the stored app secret if none was typed
+
+
+@router.post("/dropbox/exchange")
+def dropbox_exchange(payload: DropboxExchangePayload, db: Session = Depends(get_db),
+                     user: User = Depends(get_admin_user)):
+    app_secret = payload.app_secret
+    if (not app_secret or app_secret == _REDACTED) and payload.target_id is not None:
+        target = db.query(StorageTarget).filter(StorageTarget.id == payload.target_id).first()
+        if target and target.type == "dropbox":
+            app_secret = json.loads(target.config_json).get("app_secret", "")
+    try:
+        return rclone_backends.dropbox_exchange_code(payload.app_key, app_secret, payload.code)
+    except rclone_backends.ConfigError as exc:
+        raise HTTPException(400, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Dropbox-Anmeldung fehlgeschlagen: {exc}")
 
 
 class SmbSharesPayload(BaseModel):

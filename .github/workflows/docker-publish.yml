@@ -27,6 +27,18 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      # Real rclone + restic binaries, so tests/test_connectors_real_rclone.py
+      # exercises SFTP/WebDAV/FTP targets against real local servers.
+      # Official rclone build, same as the Docker image: the Ubuntu package is
+      # built without `rclone serve ftp`, which the FTP tests need.
+      - name: Install rclone and restic
+        run: |
+          curl -fsSL https://downloads.rclone.org/rclone-current-linux-amd64.zip -o /tmp/rclone.zip
+          unzip -q /tmp/rclone.zip -d /tmp
+          sudo install -m 755 /tmp/rclone-*-linux-amd64/rclone /usr/local/bin/rclone
+          rclone version
+          sudo apt-get update && sudo apt-get install -y restic
+
       - name: Run tests
         run: python -m pytest -q
 

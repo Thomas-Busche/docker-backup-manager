@@ -253,7 +253,7 @@ def _run_remote_cleanup(task: dict) -> list[str]:
                     finally:
                         if smb_conf_path:
                             try:
-                                Path(smb_conf_path).unlink(missing_ok=True)
+                                restic_engine.rclone_backends.discard_conf(smb_conf_path)
                             except Exception:
                                 pass
                 elif not repo_url:

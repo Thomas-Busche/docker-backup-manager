@@ -33,6 +33,7 @@ import time
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
+from app import rclone_backends
 from app.config import BASE_DIR
 
 logger = logging.getLogger("dbm.restic_engine")
@@ -173,6 +174,10 @@ def repo_url_and_env(
         base_parts = [p for p in [prefix, safe, "restic_repo"] if p]
         if endpoint:
             repo = f"s3:{endpoint}/{bucket}/" + "/".join(base_parts)
+            if config.get("region"):
+                # e.g. Backblaze/Hetzner/R2 - restic otherwise guesses the
+                # region via GetBucketLocation, which not every provider answers.
+                env["AWS_DEFAULT_REGION"] = config["region"]
         else:
             region = config.get("region", "us-east-1") or "us-east-1"
             repo = f"s3:s3.amazonaws.com/{bucket}/" + "/".join(base_parts)
@@ -190,10 +195,19 @@ def repo_url_and_env(
         from app.storage_sync import RCLONE_CONFIG_PATH
         env["RCLONE_CONFIG"] = RCLONE_CONFIG_PATH
 
+    elif rclone_backends.is_managed(target_type):
+        # SFTP, WebDAV, FTP, Azure, Dropbox, ... configured in the UI: restic
+        # talks to them through rclone with a generated temp rclone.conf,
+        # which the caller removes afterwards (same contract as for SMB).
+        smb_conf_path, rclone_config = rclone_backends.write_conf(target_type, config)
+        base_parts = [p for p in [rclone_config["remote_path"], safe, "restic_repo"] if p]
+        repo = f"rclone:{rclone_config['remote']}:" + "/".join(base_parts)
+        env["RCLONE_CONFIG"] = smb_conf_path
+
     else:
         raise ValueError(
             f"Restic unterstützt diesen Zieltyp nicht: '{target_type}' "
-            "(unterstützt: local_path, smb, s3, rclone)"
+            "(nicht für Google Drive und OneDrive)"
         )
 
     return repo, env, smb_conf_path
@@ -571,7 +585,7 @@ def cleanup_restic_repo_for_container(
     finally:
         if smb_conf_path:
             try:
-                Path(smb_conf_path).unlink(missing_ok=True)
+                rclone_backends.discard_conf(smb_conf_path)
             except Exception:
                 pass
 
@@ -593,7 +607,7 @@ def purge_restic_repo(container_name: str, stream_target: tuple) -> None:
     finally:
         if smb_conf_path:
             try:
-                Path(smb_conf_path).unlink(missing_ok=True)
+                rclone_backends.discard_conf(smb_conf_path)
             except Exception:
                 pass
 
@@ -649,6 +663,6 @@ def maybe_forget_restic(backup_path: Path, stream_target: Optional[tuple]) -> No
     finally:
         if smb_conf_path:
             try:
-                Path(smb_conf_path).unlink(missing_ok=True)
+                rclone_backends.discard_conf(smb_conf_path)
             except Exception:
                 pass

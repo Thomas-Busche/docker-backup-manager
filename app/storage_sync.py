@@ -19,6 +19,10 @@ Supported target types:
     admin configures the remote once (rclone.conf, mounted as a secret or
     built via `rclone config`) and just references its name + a destination
     path here.
+  - sftp / webdav / ftp / azure_blob / dropbox / rclone_cloud: also run on
+    the bundled rclone, but are configured entirely in the web UI - a temp
+    rclone.conf is generated per operation (app/rclone_backends.py) and the
+    regular rclone code paths below are reused.
   - google_drive / onedrive: OAuth-based targets set up entirely from the web
     UI ("Mit Google/Microsoft anmelden") - no rclone.conf, no terminal. See
     app/oauth_storage.py for the actual OAuth + upload implementation; this
@@ -37,6 +41,7 @@ import threading
 from pathlib import Path, PurePosixPath
 from typing import Optional
 
+from app import rclone_backends
 from app.config import BACKUPS_DIR
 
 logger = logging.getLogger("dbm.storage_sync")
@@ -82,12 +87,39 @@ def _s3_client(config: dict):
         aws_secret_access_key=config["secret_key"],
         region_name=config.get("region") or None,
     )
+    addressing = config.get("addressing_style") or "auto"
+    if addressing not in ("auto", "path", "virtual"):
+        addressing = "auto"
     return session.client(
         "s3",
         endpoint_url=config.get("endpoint_url") or None,
         config=Config(connect_timeout=30, read_timeout=300,
-                      retries={"max_attempts": 10, "mode": "adaptive"}),
+                      retries={"max_attempts": 10, "mode": "adaptive"},
+                      # MinIO and other self-hosted servers reached by IP need
+                      # path-style URLs (http://host:9000/bucket/key).
+                      s3={"addressing_style": addressing},
+                      # Since boto3 1.36 every upload carries a CRC checksum
+                      # header/trailer by default. Several S3-compatible
+                      # services (older MinIO/Ceph, some hosted providers)
+                      # reject that - only send checksums the API requires.
+                      request_checksum_calculation="when_required",
+                      response_checksum_validation="when_required"),
     )
+
+
+_S3_STORAGE_CLASSES = ("STANDARD", "STANDARD_IA", "ONEZONE_IA", "INTELLIGENT_TIERING", "GLACIER_IR")
+
+
+def _s3_extra_args(config: dict) -> Optional[dict]:
+    """Optional storage class for uploads (AWS). Classes needing a restore
+    request before download (GLACIER, DEEP_ARCHIVE) are deliberately not
+    allowed - a restore would fail until AWS thawed the objects."""
+    storage_class = (config.get("storage_class") or "").strip().upper()
+    if not storage_class or storage_class == "STANDARD":
+        return None
+    if storage_class not in _S3_STORAGE_CLASSES:
+        raise ValueError(f"Nicht unterstützte S3-Speicherklasse: {storage_class}")
+    return {"StorageClass": storage_class}
 
 
 def _s3_dir_prefix(config: dict, relative_key: str) -> str:
@@ -118,13 +150,14 @@ def sync_s3(backup_path: Path, config: dict) -> None:
     bucket = config["bucket"]
     prefix = config.get("prefix", "").strip("/")
     key_root = _relative_key(backup_path)
+    extra_args = _s3_extra_args(config)
 
     for file_path in Path(backup_path).rglob("*"):
         if not file_path.is_file():
             continue
         rel = file_path.relative_to(backup_path)
         key = "/".join(filter(None, [prefix, key_root, str(rel).replace("\\", "/")]))
-        s3.upload_file(str(file_path), bucket, key)
+        s3.upload_file(str(file_path), bucket, key, ExtraArgs=extra_args)
 
 
 def _smb_remote_root(config: dict, key_root: str) -> str:
@@ -215,9 +248,10 @@ def sync_smb(backup_path: Path, config: dict) -> None:
             shutil.copyfileobj(src, dst, length=_SMB_IO_BUFFER_SIZE)
 
 
-def sync_rclone(backup_path: Path, config: dict) -> None:
+def sync_rclone(backup_path: Path, config: dict, conf_path: Optional[str] = None) -> None:
+    conf_path = conf_path or RCLONE_CONFIG_PATH
     dest = _rclone_path(config, _relative_key(backup_path))
-    cmd = ["rclone", "copy", str(backup_path), dest, "--config", RCLONE_CONFIG_PATH, *_RCLONE_TRANSFER_FLAGS]
+    cmd = ["rclone", "copy", str(backup_path), dest, "--config", conf_path, *_RCLONE_TRANSFER_FLAGS]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=TRANSFER_TIMEOUT_SECONDS)
     if proc.returncode != 0:
         raise RuntimeError(f"rclone failed: {proc.stderr.strip() or proc.stdout.strip()}")
@@ -312,12 +346,13 @@ def _delete_smb(config: dict, relative_key: str) -> None:
             break
 
 
-def _delete_rclone(config: dict, relative_key: str) -> None:
+def _delete_rclone(config: dict, relative_key: str, conf_path: Optional[str] = None) -> None:
+    conf_path = conf_path or RCLONE_CONFIG_PATH
     if not relative_key.strip("/"):
         raise ValueError("rclone: leerer Pfad - Löschen des Zielordners verweigert")
     dest = _rclone_path(config, relative_key)
     proc = subprocess.run(
-        ["rclone", "purge", dest, "--config", RCLONE_CONFIG_PATH],
+        ["rclone", "purge", dest, "--config", conf_path],
         capture_output=True, text=True, timeout=300,
     )
     if proc.returncode != 0 and "directory not found" not in (proc.stderr or "").lower():
@@ -328,7 +363,7 @@ def _delete_rclone(config: dict, relative_key: str) -> None:
         parent_key = "/".join(parts[:i])
         parent_dest = _rclone_path(config, parent_key)
         result = subprocess.run(
-            ["rclone", "rmdir", parent_dest, "--config", RCLONE_CONFIG_PATH],
+            ["rclone", "rmdir", parent_dest, "--config", conf_path],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode != 0:
@@ -388,6 +423,8 @@ def try_rmdir_on_target(target_type: str, config_json: str, relative_key: str) -
             dest = Path(config["path"]) / relative_key
             if dest.exists() and not any(dest.iterdir()):
                 dest.rmdir()
+        elif rclone_backends.is_managed(target_type):
+            _managed_try_rmdir(target_type, config, relative_key)
     except Exception:
         pass
 
@@ -425,7 +462,7 @@ def _stream_upload_local_path(config: dict, relative_path: str, chunks) -> None:
 def _stream_upload_s3(config: dict, relative_path: str, chunks) -> None:
     s3 = _s3_client(config)
     key = "/".join(filter(None, [config.get("prefix", "").strip("/"), relative_path]))
-    s3.upload_fileobj(_ChunkIteratorReader(chunks), config["bucket"], key)
+    s3.upload_fileobj(_ChunkIteratorReader(chunks), config["bucket"], key, ExtraArgs=_s3_extra_args(config))
 
 
 def _stream_upload_smb(config: dict, relative_path: str, chunks) -> None:
@@ -441,10 +478,11 @@ def _stream_upload_smb(config: dict, relative_path: str, chunks) -> None:
             dst.write(chunk)
 
 
-def _stream_upload_rclone(config: dict, relative_path: str, chunks) -> None:
+def _stream_upload_rclone(config: dict, relative_path: str, chunks, conf_path: Optional[str] = None) -> None:
+    conf_path = conf_path or RCLONE_CONFIG_PATH
     dest = _rclone_path(config, relative_path)
     proc = subprocess.Popen(
-        ["rclone", "rcat", dest, "--config", RCLONE_CONFIG_PATH, "--low-level-retries", "10"],
+        ["rclone", "rcat", dest, "--config", conf_path, "--low-level-retries", "10"],
         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
     )
     # Drain stderr concurrently: if rclone logs more than a pipe buffer's worth
@@ -470,6 +508,10 @@ def _stream_upload_rclone(config: dict, relative_path: str, chunks) -> None:
         if proc.poll() is None:
             proc.kill()
             proc.wait()
+        try:
+            proc.stdin.close()
+        except OSError:  # already closed, or rclone gone with unread data
+            pass
 
 
 STREAM_UPLOAD_HANDLERS = {
@@ -501,10 +543,11 @@ def _delete_partial_s3(config: dict, relative_path: str) -> None:
     s3.delete_object(Bucket=config["bucket"], Key=key)
 
 
-def _delete_partial_rclone(config: dict, relative_path: str) -> None:
+def _delete_partial_rclone(config: dict, relative_path: str, conf_path: Optional[str] = None) -> None:
+    conf_path = conf_path or RCLONE_CONFIG_PATH
     dest = _rclone_path(config, relative_path)
     subprocess.run(
-        ["rclone", "deletefile", dest, "--config", RCLONE_CONFIG_PATH],
+        ["rclone", "deletefile", dest, "--config", conf_path],
         capture_output=True, text=True, timeout=300,
     )
 
@@ -526,7 +569,7 @@ def stream_upload_to_target(target_type: str, config_json: str, relative_path: s
     if not handler:
         raise ValueError(
             f"Direktes Streaming wird für Zieltyp '{target_type}' nicht unterstützt "
-            "(nur lokaler Pfad, SMB, S3 und rclone)."
+            "(nicht für Google Drive und OneDrive)."
         )
     config = json.loads(config_json or "{}")
     try:
@@ -581,10 +624,11 @@ def _download_smb(config: dict, relative_path: str, dest_path: Path) -> None:
         shutil.copyfileobj(src, dst, length=_SMB_IO_BUFFER_SIZE)
 
 
-def _download_rclone(config: dict, relative_path: str, dest_path: Path) -> None:
+def _download_rclone(config: dict, relative_path: str, dest_path: Path, conf_path: Optional[str] = None) -> None:
+    conf_path = conf_path or RCLONE_CONFIG_PATH
     src = _rclone_path(config, relative_path)
     proc = subprocess.run(
-        ["rclone", "copyto", src, str(dest_path), "--config", RCLONE_CONFIG_PATH, *_RCLONE_TRANSFER_FLAGS],
+        ["rclone", "copyto", src, str(dest_path), "--config", conf_path, *_RCLONE_TRANSFER_FLAGS],
         capture_output=True, text=True, timeout=TRANSFER_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
@@ -719,6 +763,8 @@ def check_target_connection(target_type: str, config_json: str) -> None:
     elif target_type == "onedrive":
         from app import oauth_storage
         oauth_storage.check_onedrive_connection(config)
+    elif rclone_backends.is_managed(target_type):
+        _check_managed_connection(target_type, config)
     else:
         raise ValueError(f"Unknown storage target type: {target_type}")
 
@@ -779,6 +825,8 @@ def get_target_space_info(target_type: str, config_json: str) -> dict:
             if not remote:
                 return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
             return _rclone_about(f"{remote}:", RCLONE_CONFIG_PATH)
+        elif rclone_backends.is_managed(target_type):
+            return _managed_space_info(target_type, config)
     except Exception:
         pass
     return {"total_bytes": None, "used_bytes": None, "free_bytes": None}
@@ -922,10 +970,11 @@ def _list_backups_smb(config: dict) -> list[dict]:
     return entries
 
 
-def _list_backups_rclone(config: dict) -> list[dict]:
+def _list_backups_rclone(config: dict, conf_path: Optional[str] = None) -> list[dict]:
+    conf_path = conf_path or RCLONE_CONFIG_PATH
     src = _rclone_path(config)
     proc = subprocess.run(
-        ["rclone", "lsjson", src, "-R", "--files-only", "--config", RCLONE_CONFIG_PATH],
+        ["rclone", "lsjson", src, "-R", "--files-only", "--config", conf_path],
         capture_output=True, text=True, timeout=300,
     )
     if proc.returncode != 0:
@@ -979,7 +1028,7 @@ def list_backups_on_target(target_type: str, config_json: str) -> list[dict]:
     if not handler:
         raise ValueError(
             f"Katalog-Import wird für Zieltyp '{target_type}' nicht unterstützt "
-            "(nur lokaler Pfad, SMB, S3 und rclone)."
+            "(nicht für Google Drive und OneDrive)."
         )
     config = json.loads(config_json or "{}")
     return handler(config)
@@ -1037,10 +1086,11 @@ def _download_full_smb(config: dict, relative_key: str, dest_dir: Path) -> None:
         raise RuntimeError(f"rclone copy (SMB) fehlgeschlagen: {(proc.stderr or proc.stdout or '').strip()}")
 
 
-def _download_full_rclone(config: dict, relative_key: str, dest_dir: Path) -> None:
+def _download_full_rclone(config: dict, relative_key: str, dest_dir: Path, conf_path: Optional[str] = None) -> None:
+    conf_path = conf_path or RCLONE_CONFIG_PATH
     src = _rclone_path(config, relative_key)
     proc = subprocess.run(
-        ["rclone", "copy", src, str(dest_dir), "--config", RCLONE_CONFIG_PATH, *_RCLONE_TRANSFER_FLAGS],
+        ["rclone", "copy", src, str(dest_dir), "--config", conf_path, *_RCLONE_TRANSFER_FLAGS],
         capture_output=True, text=True, timeout=TRANSFER_TIMEOUT_SECONDS,
     )
     if proc.returncode != 0:
@@ -1066,3 +1116,61 @@ def download_full_backup_from_target(target_type: str, config_json: str, relativ
     config = json.loads(config_json or "{}")
     dest_dir.parent.mkdir(parents=True, exist_ok=True)
     handler(config, relative_key, dest_dir)
+
+
+# ---------- rclone-based targets configured in the web UI (SFTP, WebDAV, FTP,
+# Azure Blob, Dropbox, further clouds). Each operation materializes a temp
+# rclone.conf from the stored settings and then runs the exact same code path
+# as a hand-configured "rclone" target. See app/rclone_backends.py. ----------
+
+def _managed(target_type: str, fn):
+    """Wraps an rclone handler (config first, conf_path keyword) so it runs
+    against a freshly generated rclone.conf for a UI-configured target."""
+    def handler(config: dict, *args):
+        with rclone_backends.materialized(target_type, config) as (conf_path, rclone_config):
+            return fn(rclone_config, *args, conf_path=conf_path)
+    return handler
+
+
+def _managed_sync(target_type: str):
+    def handler(backup_path: Path, config: dict) -> None:
+        with rclone_backends.materialized(target_type, config) as (conf_path, rclone_config):
+            sync_rclone(backup_path, rclone_config, conf_path=conf_path)
+    return handler
+
+
+for _t in rclone_backends.TARGET_TYPES:
+    SYNC_HANDLERS[_t] = _managed_sync(_t)
+    DELETE_HANDLERS[_t] = _managed(_t, _delete_rclone)
+    STREAM_UPLOAD_HANDLERS[_t] = _managed(_t, _stream_upload_rclone)
+    STREAM_UPLOAD_CLEANUP_HANDLERS[_t] = _managed(_t, _delete_partial_rclone)
+    DOWNLOAD_HANDLERS[_t] = _managed(_t, _download_rclone)
+    LIST_BACKUPS_HANDLERS[_t] = _managed(_t, _list_backups_rclone)
+    DOWNLOAD_FULL_HANDLERS[_t] = _managed(_t, _download_full_rclone)
+del _t
+
+
+def _check_managed_connection(target_type: str, config: dict) -> None:
+    """Writes and deletes a small probe file - proves login, path and write
+    permission in one go (a plain listing would pass on a read-only login)."""
+    with rclone_backends.materialized(target_type, config) as (conf_path, rclone_config):
+        probe = _rclone_path(rclone_config, ".dbm_write_test")
+        proc = subprocess.run(
+            ["rclone", "rcat", probe, "--config", conf_path, "--low-level-retries", "2", "--retries", "1"],
+            input="ok", capture_output=True, text=True, timeout=60,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or f"rclone exit {proc.returncode}")
+        subprocess.run(["rclone", "deletefile", probe, "--config", conf_path],
+                       capture_output=True, text=True, timeout=60)
+
+
+def _managed_space_info(target_type: str, config: dict) -> dict:
+    with rclone_backends.materialized(target_type, config) as (conf_path, rclone_config):
+        return _rclone_about(f"{rclone_config['remote']}:", conf_path)
+
+
+def _managed_try_rmdir(target_type: str, config: dict, relative_key: str) -> None:
+    with rclone_backends.materialized(target_type, config) as (conf_path, rclone_config):
+        subprocess.run(["rclone", "rmdir", _rclone_path(rclone_config, relative_key), "--config", conf_path],
+                       capture_output=True, text=True, timeout=30)
