@@ -2,7 +2,7 @@
 
 > **Version 1.5.1** — webbasiertes Backup- und Restore-Tool für Docker-Container
 
-Ein selbst gehostetes Web-Interface zum Sichern und Wiederherstellen von Docker-Containern — einzeln oder als komplette Gruppe (Landscape). Backups lassen sich lokal, auf SMB-Freigaben (NAS), S3-kompatiblen Diensten, Google Drive, OneDrive und vielen weiteren Cloud-Zielen speichern. Die gesamte Konfiguration erfolgt im Browser, kein Kommandozeilen-Wissen nötig.
+Ein selbst gehostetes Web-Interface zum Sichern und Wiederherstellen von Docker-Containern — einzeln oder als komplette Gruppe (Landscape). Backups lassen sich lokal, auf SMB-Freigaben (NAS), S3-kompatiblen Diensten, per SFTP, WebDAV oder FTP, in Azure, Google Drive, OneDrive, Dropbox und vielen weiteren Cloud-Zielen speichern. Die gesamte Konfiguration erfolgt im Browser, kein Kommandozeilen-Wissen nötig.
 
 Das Tool spricht ausschließlich mit der **Docker Engine API** (über den Docker-Socket), nie mit der `docker`-CLI. Es läuft dadurch identisch auf Docker Desktop, Synology Container Manager, QNAP Container Station, UGREEN Docker-App oder purem Docker Engine auf Linux.
 
@@ -36,6 +36,12 @@ Das Tool spricht ausschließlich mit der **Docker Engine API** (über den Docker
   - [SMB / CIFS (Windows-Freigabe / NAS)](#smb--cifs-windows-freigabe--nas)
   - [Lokaler / gemounteter Pfad](#lokaler--gemounteter-pfad)
   - [S3-kompatibel](#s3-kompatibel)
+  - [SFTP / SSH](#sftp--ssh)
+  - [WebDAV](#webdav)
+  - [FTP / FTPS](#ftp--ftps)
+  - [Azure Blob Storage](#azure-blob-storage)
+  - [Dropbox](#dropbox)
+  - [Weitere Cloud-Dienste](#weitere-cloud-dienste)
   - [Google Drive](#google-drive)
   - [OneDrive](#onedrive)
   - [rclone (Dropbox, SFTP, WebDAV, …)](#rclone-dropbox-sftp-webdav-)
@@ -63,7 +69,7 @@ Das Tool spricht ausschließlich mit der **Docker Engine API** (über den Docker
 | **Restore** | Auf demselben oder einem anderen Host/OS; Container-Name anpassbar; Landscape-Gruppe auf einmal oder nur einzelne Mitglieder |
 | **Parallel-Restore** | Landscape auf einem Parallel-System wiederherstellen mit Name-Präfix (z. B. `staging_`) ohne Produktionssystem zu berühren |
 | **Zeitpläne** | Stündlich / täglich / wöchentlich / monatlich + Uhrzeit, kein Cron-Wissen nötig; Aufbewahrungsrichtlinie (Anzahl Versionen + Alter in Tagen) |
-| **Speicherziele** | SMB/CIFS, lokaler/gemounteter Pfad, S3-kompatibel, Google Drive (OAuth), OneDrive (OAuth), rclone (Dropbox, Box, pCloud, SFTP, WebDAV, …) |
+| **Speicherziele** | SMB/CIFS, lokaler/gemounteter Pfad, S3-kompatibel (mit Vorlagen für Backblaze B2, Wasabi, Hetzner, Cloudflare R2, MinIO, …), SFTP, WebDAV, FTP/FTPS, Azure Blob, Google Drive, OneDrive, Dropbox, pCloud, Box, Mega, Koofr, Storj, rclone-Remote aus eigener rclone.conf |
 | **Streaming** | Volume-Daten direkt ans Speicherziel, ohne lokalen Zwischenspeicher (für große Volumes wie Immich-Mediatheken) |
 | **Verschlüsselung** | AES-256-CBC + HMAC-SHA256 at rest (Schlüssel nur per Umgebungsvariable) |
 | **Benutzerverwaltung** | Mehrere Benutzer, Admin- und Nutzer-Rolle; Admin kann Benutzer anlegen, löschen und entsperren |
@@ -365,7 +371,7 @@ Landscape-Backups ermöglichen zwei Modi:
 **Variante A — Katalog von Speicherziel importieren (empfohlen bei Totalverlust):**
 
 1. Docker Backup Manager auf dem neuen Host installieren und starten.
-2. Unter **Einstellungen → Speicherziele** dasselbe Speicherziel erneut anlegen (SMB, S3, lokaler Pfad oder rclone), auf dem die alten Backups liegen.
+2. Unter **Einstellungen → Speicherziele** dasselbe Speicherziel erneut anlegen (jeder Typ außer Google Drive und OneDrive), auf dem die alten Backups liegen.
 3. Auf **„Katalog importieren"** klicken — die App durchsucht das Ziel nach vorhandenen Backup-Versionen und legt passende Einträge unter **Backups** an.
 4. Aus der **Backups**-Liste die gewünschte Version wiederherstellen. Die Daten werden erst beim Klick auf „Wiederherstellen" automatisch heruntergeladen.
 
@@ -405,7 +411,56 @@ Danach in den Einstellungen `/mnt/remote-backup` als lokalen Pfad eintragen.
 
 ### S3-kompatibel
 
-Bucket, Endpoint (leer für AWS S3), Region, Access Key und Secret Key eintragen. Kompatibel mit AWS S3, MinIO, Wasabi, Backblaze B2 (S3-API) und weiteren S3-kompatiblen Diensten.
+Bucket, Endpoint (leer für AWS S3), Region, Access Key und Secret Key eintragen. Über **Anbieter-Vorlage** werden Endpoint und Region für Backblaze B2, Wasabi, Hetzner Object Storage, Cloudflare R2, MinIO, IDrive e2, Synology C2, Scaleway, OVHcloud und Google Cloud Storage (HMAC-Schlüssel) vorbelegt, mit einem Hinweis, wo die Zugangsdaten zu finden sind.
+
+- **Adressierung:** „Pfad-Stil" für MinIO und andere Server, die per IP-Adresse erreicht werden.
+- **Speicherklasse (nur AWS):** STANDARD, STANDARD_IA, ONEZONE_IA, INTELLIGENT_TIERING oder GLACIER_IR. Glacier Flexible Retrieval und Deep Archive werden bewusst nicht angeboten, weil eine Wiederherstellung erst nach Stunden möglich wäre.
+- Die App schickt nur die Prüfsummen mit, die die S3-API verlangt. Neuere boto3-Versionen senden sonst standardmäßig zusätzliche CRC-Prüfsummen, die manche S3-kompatible Anbieter ablehnen.
+
+### SFTP / SSH
+
+Für Hetzner Storage Box (Port **23**), rsync.net, jeden Linux-Server oder ein zweites NAS. Host, Port, Benutzer und entweder Passwort oder privaten SSH-Schlüssel eintragen.
+
+- **Host-Key (empfohlen):** Ausgabe von `ssh-keyscan -p PORT HOST` einfügen. Dann prüft die App, dass sie wirklich mit deinem Server spricht. Ohne Host-Key wird jeder Server-Schlüssel akzeptiert.
+- Verschlüsselte Schlüssel kann rclone nur im alten PEM-Format entschlüsseln. Am einfachsten einen eigenen Schlüssel ohne Passphrase nur für Backups anlegen.
+- Zielordner ohne führenden `/` ist relativ zum Home-Verzeichnis (bei der Storage Box nötig).
+
+### WebDAV
+
+Vorlagen für Nextcloud, ownCloud, MagentaCLOUD, IONOS/STRATO HiDrive, Koofr und SharePoint; „Anderer WebDAV-Server" für Synology, QNAP & Co. URL, Benutzer und (App-)Passwort eintragen. Bei Nextcloud/MagentaCLOUD ein App-Passwort statt des Login-Passworts verwenden.
+
+### FTP / FTPS
+
+Für die Fritz!Box (USB-Speicher als NAS) und ältere NAS-Geräte. Standard ist FTPS mit expliziter Verschlüsselung. „Zertifikat nicht prüfen" nur für selbst signierte Zertifikate im eigenen Netz aktivieren (z. B. Fritz!Box). Unverschlüsseltes FTP ist möglich, überträgt Passwort und Daten aber im Klartext.
+
+### Azure Blob Storage
+
+Speicherkonto + Zugriffsschlüssel oder alternativ eine SAS-URL, dazu Container und optional ein Präfix. Die Zugriffsebene (Hot/Cool/Cold) ist wählbar; „Archive" wird nicht angeboten, weil archivierte Daten vor einer Wiederherstellung erst stundenlang reaktiviert werden müssten.
+
+### Dropbox
+
+1. Unter [dropbox.com/developers/apps](https://www.dropbox.com/developers/apps/create) eine App anlegen („Scoped access", „App folder" oder „Full Dropbox").
+2. Unter *Permissions* `files.content.write`, `files.content.read` und `account_info.read` aktivieren.
+3. App key und App secret im Dialog eintragen, **Bei Dropbox anmelden** klicken, Zugriff erlauben und den angezeigten Code einfügen, dann **Verbinden**.
+
+Die Anmeldung braucht keine öffentliche Adresse und keine Redirect-URL, funktioniert also auch, wenn die App nur per `http://<LAN-IP>` erreichbar ist. Das Refresh-Token bleibt auf dem Server und wird nie an den Browser zurückgegeben.
+
+### Weitere Cloud-Dienste
+
+Typ **„Weitere Cloud"** bietet kleine Formulare für:
+
+| Dienst | Was eintragen |
+|---|---|
+| pCloud | Region (EU/USA) und Token aus `rclone authorize "pcloud"` |
+| Box | Token aus `rclone authorize "box"` |
+| Mega | E-Mail und Passwort (Zwei-Faktor-Anmeldung muss aus sein) |
+| Koofr | E-Mail und App-Passwort |
+| Storj | Access Grant aus der Storj-Konsole |
+| Anderes rclone-Backend | Backend-Name und Optionen (`schluessel = wert`), Werte für `pass`/`password` werden automatisch verschleiert |
+
+Den Token für pCloud und Box erzeugt man einmalig auf einem beliebigen Rechner mit Browser: [rclone](https://rclone.org/downloads/) installieren, `rclone authorize "pcloud"` ausführen und die ausgegebene JSON-Zeile komplett einfügen.
+
+**Technik:** SFTP, WebDAV, FTP, Azure, Dropbox und die weiteren Clouds laufen über das mitgelieferte rclone. Für jeden Vorgang erzeugt die App eine temporäre rclone.conf (Rechte 0600) aus den gespeicherten Einstellungen und löscht sie danach wieder. Alle diese Ziele unterstützen Volume-Streaming mit restic, Wiederherstellen, Löschen und den Katalog-Import.
 
 ### Google Drive
 
@@ -457,7 +512,7 @@ Funktioniert mit privaten Microsoft-/Outlook-Konten und Firmenkonten.
 
 ### rclone (Dropbox, Box, pCloud, Mega, SFTP, WebDAV, …)
 
-Für alle Cloud-Dienste, für die es keine eigene Option gibt:
+Für Experten, die eine vorhandene rclone.conf weiterverwenden möchten:
 
 1. Lokal `rclone config` ausführen und einen Remote konfigurieren.
 2. Die erzeugte `rclone.conf` in den Container einbinden:
@@ -643,6 +698,7 @@ app/
 ├── restic_engine.py     Volume-Streaming via restic + rclone
 ├── scheduler.py         APScheduler-Integration, Aufbewahrungsrichtlinie
 ├── storage_sync.py      Speicherziel-Synchronisierung (SMB, S3, rclone, …)
+├── rclone_backends.py   SFTP, WebDAV, FTP, Azure, Dropbox, weitere Clouds (rclone-Konfiguration aus der Weboberfläche)
 ├── encryption.py        AES-256-CBC-Verschlüsselung
 ├── job_tracker.py       Laufende Job-Fortschrittsverfolgung
 ├── event_log.py         Persistente Ereignishistorie

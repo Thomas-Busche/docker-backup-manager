@@ -292,7 +292,7 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             finally:
                 if smb_conf_path:
                     try:
-                        Path(smb_conf_path).unlink(missing_ok=True)
+                        restic_engine.rclone_backends.discard_conf(smb_conf_path)
                     except Exception:
                         pass
             _restic_restore = True

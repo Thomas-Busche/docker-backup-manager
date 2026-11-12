@@ -387,7 +387,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             use_restic = False
             if restic_smb_conf:
                 try:
-                    Path(restic_smb_conf).unlink(missing_ok=True)
+                    restic_engine.rclone_backends.discard_conf(restic_smb_conf)
                 except Exception:
                     pass
                 restic_smb_conf = None
@@ -628,7 +628,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             netpulse.resume(np_pause)
         if restic_smb_conf:
             try:
-                Path(restic_smb_conf).unlink(missing_ok=True)
+                restic_engine.rclone_backends.discard_conf(restic_smb_conf)
             except Exception:
                 pass
 

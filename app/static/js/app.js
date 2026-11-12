@@ -48,6 +48,55 @@ function fmtDuration(sec) {
 function escHtml(s) {
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
 }
+function escAttr(s) {
+  return escHtml(s == null ? "" : s).replace(/"/g, "&quot;");
+}
+
+// Target types that can receive a live byte-stream (volume streaming) and be
+// scanned for a catalog import. Google Drive/OneDrive need a known size up front.
+const STREAMABLE_TARGET_TYPES = ["local_path", "smb", "s3", "rclone",
+  "sftp", "webdav", "ftp", "azure_blob", "dropbox", "rclone_cloud"];
+
+// Pre-filled endpoints for S3-compatible providers. Only stable, documented
+// endpoints are filled in as values; account-specific ones are placeholders.
+const S3_PRESETS = {
+  other: { label: "Eigene Angaben" },
+  aws: { label: "Amazon S3 (AWS)", endpoint: "", region: "eu-central-1" },
+  b2: { label: "Backblaze B2", endpoint: "https://s3.eu-central-003.backblazeb2.com", region: "eu-central-003",
+    hint: "Endpoint und Region stehen in der Bucket-Übersicht (z. B. s3.us-west-004...). Access Key = keyID, Secret Key = applicationKey." },
+  wasabi: { label: "Wasabi", endpoint: "https://s3.eu-central-1.wasabisys.com", region: "eu-central-1",
+    hint: "Region an den Bucket-Standort anpassen (z. B. eu-central-2, us-east-1)." },
+  hetzner: { label: "Hetzner Object Storage", endpoint: "https://fsn1.your-objectstorage.com", region: "fsn1",
+    hint: "Standorte: fsn1 (Falkenstein), nbg1 (Nürnberg), hel1 (Helsinki) - Endpoint und Region gleich wählen." },
+  r2: { label: "Cloudflare R2", endpoint: "", endpointPlaceholder: "https://<ACCOUNT_ID>.r2.cloudflarestorage.com", region: "auto",
+    hint: "Account-ID aus dem R2-Dashboard in den Endpoint einsetzen. Zugang über „R2 API-Token verwalten“." },
+  minio: { label: "MinIO / selbst gehostet", endpoint: "", endpointPlaceholder: "http://192.168.1.10:9000", region: "us-east-1", addressing: "path",
+    hint: "Pfad-Stil ist vorausgewählt - nötig, wenn der Server per IP-Adresse erreicht wird." },
+  idrive: { label: "IDrive e2", endpoint: "", endpointPlaceholder: "https://xxxx.fra.idrivee2-xx.com", region: "",
+    hint: "Endpoint steht in der IDrive-e2-Konsole beim jeweiligen Standort." },
+  synology_c2: { label: "Synology C2 Object Storage", endpoint: "", endpointPlaceholder: "Endpoint aus dem C2-Portal", region: "",
+    hint: "Endpoint und Region aus dem Synology-C2-Portal übernehmen." },
+  scaleway: { label: "Scaleway", endpoint: "https://s3.fr-par.scw.cloud", region: "fr-par",
+    hint: "Regionen: fr-par, nl-ams, pl-waw - Endpoint entsprechend anpassen." },
+  ovh: { label: "OVHcloud", endpoint: "", endpointPlaceholder: "https://s3.gra.io.cloud.ovh.net", region: "gra",
+    hint: "Endpoint und Region aus dem OVH-Kundencenter beim Bucket übernehmen." },
+  gcs: { label: "Google Cloud Storage (HMAC)", endpoint: "https://storage.googleapis.com", region: "auto",
+    hint: "In der Cloud Console unter Cloud Storage > Einstellungen > Interoperabilität einen HMAC-Schlüssel anlegen." },
+};
+
+const WEBDAV_PRESETS = {
+  nextcloud: { label: "Nextcloud", vendor: "nextcloud", url: "https://cloud.example.de/remote.php/dav/files/BENUTZER",
+    hint: "Unter Persönliche Einstellungen > Sicherheit ein App-Passwort erzeugen und verwenden." },
+  owncloud: { label: "ownCloud", vendor: "owncloud", url: "https://cloud.example.de/remote.php/webdav" },
+  magentacloud: { label: "MagentaCLOUD (Telekom)", vendor: "nextcloud", url: "https://magentacloud.de/remote.php/dav/files/BENUTZER",
+    hint: "URL und Benutzer stehen in der MagentaCLOUD unter Einstellungen > WebDAV. App-Passwort verwenden." },
+  hidrive: { label: "IONOS / STRATO HiDrive", vendor: "other", fixedUrl: "https://webdav.hidrive.ionos.com", url: "https://webdav.hidrive.ionos.com",
+    hint: "STRATO-Kunden: https://webdav.hidrive.strato.com. WebDAV muss im HiDrive-Konto für den Benutzer freigeschaltet sein." },
+  koofr: { label: "Koofr (WebDAV)", vendor: "other", fixedUrl: "https://app.koofr.net/dav/Koofr", url: "https://app.koofr.net/dav/Koofr",
+    hint: "App-Passwort unter Einstellungen > Passwörter erzeugen." },
+  sharepoint: { label: "SharePoint / OneDrive for Business", vendor: "sharepoint", url: "https://firma.sharepoint.com/sites/xyz/Shared%20Documents" },
+  other: { label: "Anderer WebDAV-Server (Synology, QNAP, ...)", vendor: "other", url: "https://nas.local:5006" },
+};
 function fmtSpeed(bytesPerSec) {
   if (bytesPerSec == null) return null;
   return `${fmtBytes(bytesPerSec)}/s`;
@@ -578,7 +627,7 @@ async function pickStorageTargetsAndRun(title, runFn) {
       ${t.name} <span class="muted" style="font-size:.78rem">(${t.type})</span>
       ${t.enabled ? "" : '<span class="badge neutral">deaktiviert</span>'}
     </label>`).join("");
-  const STREAMABLE_TYPES = ["local_path", "smb", "s3", "rclone"];
+  const STREAMABLE_TYPES = STREAMABLE_TARGET_TYPES;
   const streamTargetOptionsHtml = storageTargets
     .filter((t) => STREAMABLE_TYPES.includes(t.type) && t.enabled)
     .map((t) => `<option value="${t.id}">${t.name} (${t.type})</option>`).join("");
@@ -600,7 +649,7 @@ async function pickStorageTargetsAndRun(title, runFn) {
           <div class="muted" style="font-size:.75rem; margin-top:4px;">
             Für große Volumes bei wenig lokalem Speicherplatz. Umgeht die AES-256-Verschlüsselung
             dieser App (die greift nur bei lokal geschriebenen Dateien) - nur bei vertrauenswürdigem
-            Ziel nutzen. Nur lokaler Pfad, SMB, S3 und rclone unterstützt.
+            Ziel nutzen. Nicht mit Google Drive oder OneDrive möglich.
           </div>
         </div>` : ""}
         <div class="field">
@@ -728,7 +777,8 @@ async function backupsPage() {
   const targetsMap = data.targets || {};
   const TARGET_ICONS = {
     smb: "🗂️", s3: "☁️", onedrive: "🔵", google_drive: "🟡", rclone: "📡",
-    local_path: "💾", webdav: "🌐",
+    local_path: "💾", webdav: "🌐", sftp: "🔐", ftp: "📁", azure_blob: "🔷", dropbox: "📦",
+    rclone_cloud: "☁️",
   };
   function targetBadges(ids, streamed) {
     const allIds = [...new Set([...(ids || []), ...(streamed != null ? [streamed] : [])])];
@@ -1160,7 +1210,7 @@ async function openScheduleModal(existing) {
 
   // Only these target types can receive a live byte-stream; Google Drive/OneDrive
   // need a known size/seekable content up front, so they're not offered here.
-  const STREAMABLE_TYPES = ["local_path", "smb", "s3", "rclone"];
+  const STREAMABLE_TYPES = STREAMABLE_TARGET_TYPES;
   const streamableTargets = storageTargets.filter((t) => STREAMABLE_TYPES.includes(t.type) && t.enabled);
   const streamTargetOptionsHtml = streamableTargets.map((t) =>
     `<option value="${t.id}">${t.name} (${t.type})</option>`).join("");
@@ -1244,7 +1294,7 @@ async function openScheduleModal(existing) {
             Volume-Daten gehen direkt an das gewählte Ziel, ohne je auf der lokalen Platte zu landen.
             <strong>Wichtig:</strong> dabei wird die AES-256-Verschlüsselung dieser App umgangen (die
             greift nur bei lokal geschriebenen Dateien) - nur nutzen, wenn du dem Zielsystem selbst
-            vertraust (z. B. eigenes NAS im LAN). Nur lokaler Pfad, SMB, S3 und rclone unterstützt.
+            vertraust (z. B. eigenes NAS im LAN). Nicht mit Google Drive oder OneDrive möglich.
           </div>
         </div>
         <div class="field">
@@ -1837,9 +1887,15 @@ async function settingsPage() {
     local_path: "SMB/NFS-Pfad (lokal gemountet)",
     smb: "SMB/CIFS (Benutzername/Passwort)",
     s3: "S3-kompatibel",
-    rclone: "rclone (SFTP, WebDAV, B2, ...)",
+    rclone: "rclone (eigene rclone.conf)",
     google_drive: "Google Drive",
     onedrive: "OneDrive",
+    sftp: "SFTP / SSH",
+    webdav: "WebDAV",
+    ftp: "FTP / FTPS",
+    azure_blob: "Azure Blob Storage",
+    dropbox: "Dropbox",
+    rclone_cloud: "Weitere Cloud (pCloud, Box, Mega, ...)",
   };
   if (!targetsData.targets.length) tbody.appendChild(h(`<tr><td colspan="5"><div class="empty-state">Keine externen Ziele konfiguriert</div></td></tr>`));
   targetsData.targets.forEach((t) => {
@@ -1851,7 +1907,7 @@ async function settingsPage() {
       <td style="display:flex; gap:8px;">
         <button class="btn edit-btn">Bearbeiten</button>
         <button class="btn test-btn">Testen</button>
-        ${["local_path", "smb", "s3", "rclone"].includes(t.type) ? '<button class="btn import-btn">Katalog importieren</button>' : ""}
+        ${STREAMABLE_TARGET_TYPES.includes(t.type) ? '<button class="btn import-btn">Katalog importieren</button>' : ""}
         <button class="btn danger del-btn">Löschen</button>
       </td>
     </tr>`);
@@ -1959,10 +2015,16 @@ async function openStorageTargetModal(existing) {
           <select id="t-type">
             <option value="smb">SMB/CIFS (Server + Benutzername/Passwort)</option>
             <option value="local_path">Bereits gemounteter Pfad (SMB/NFS am Host)</option>
-            <option value="s3">S3-kompatibel (AWS S3, MinIO, Wasabi, ...)</option>
+            <option value="s3">S3-kompatibel (AWS, Backblaze B2, Wasabi, Hetzner, R2, MinIO, ...)</option>
+            <option value="sftp">SFTP / SSH (Hetzner Storage Box, rsync.net, Linux-Server, NAS)</option>
+            <option value="webdav">WebDAV (Nextcloud, ownCloud, HiDrive, MagentaCLOUD, ...)</option>
+            <option value="ftp">FTP / FTPS (Fritz!Box, ältere NAS)</option>
             <option value="google_drive">Google Drive (Anmelden per Browser)</option>
             <option value="onedrive">OneDrive (Anmelden per Browser)</option>
-            <option value="rclone">rclone-Remote (SFTP, WebDAV, B2, ...)</option>
+            <option value="dropbox">Dropbox (Anmelden per Browser)</option>
+            <option value="azure_blob">Azure Blob Storage</option>
+            <option value="rclone_cloud">Weitere Cloud (pCloud, Box, Mega, Koofr, Storj, ...)</option>
+            <option value="rclone">rclone-Remote aus eigener rclone.conf (Experten)</option>
           </select>
         </div>
         <div id="t-config-fields"></div>
@@ -1975,6 +2037,7 @@ async function openStorageTargetModal(existing) {
     </div>
   `);
   let oauthPending = null; // { provider, state } once a Google/OneDrive login popup succeeds
+  let dropboxPending = null; // { pending_id, account } once the Dropbox code was exchanged
   const fieldsEl = overlay.querySelector("#t-config-fields");
   async function renderFields(type, cfg) {
     cfg = cfg || {};
@@ -2031,13 +2094,44 @@ async function openStorageTargetModal(existing) {
         <div class="field"><label>Pfad im Container (z.B. gemountete SMB/NFS-Freigabe)</label>
           <input type="text" id="cfg-path" placeholder="/mnt/remote-backup" value="${cfg.path || ""}" /></div>`;
     } else if (type === "s3") {
+      const presetOpts = Object.entries(S3_PRESETS).map(([k, p]) =>
+        `<option value="${k}" ${(cfg.provider || "other") === k ? "selected" : ""}>${p.label}</option>`).join("");
+      const sc = (cfg.storage_class || "STANDARD").toUpperCase();
       fieldsEl.innerHTML = `
-        <div class="field"><label>Bucket</label><input type="text" id="cfg-bucket" value="${cfg.bucket || ""}" /></div>
-        <div class="field"><label>Endpoint-URL (leer = AWS S3)</label><input type="text" id="cfg-endpoint" placeholder="https://s3.eu-central-1.amazonaws.com" value="${cfg.endpoint_url || ""}" /></div>
-        <div class="field"><label>Region</label><input type="text" id="cfg-region" placeholder="eu-central-1" value="${cfg.region || ""}" /></div>
-        <div class="field"><label>Access Key</label><input type="text" id="cfg-access" value="${cfg.access_key || ""}" /></div>
-        <div class="field"><label>Secret Key</label><input type="password" id="cfg-secret" value="${cfg.secret_key || ""}" /></div>
-        <div class="field"><label>Präfix (optional)</label><input type="text" id="cfg-prefix" value="${cfg.prefix || ""}" /></div>`;
+        <div class="field"><label>Anbieter-Vorlage</label><select id="cfg-s3-provider">${presetOpts}</select>
+          <div class="muted" id="cfg-s3-hint" style="font-size:.75rem; margin-top:4px;"></div></div>
+        <div class="field"><label>Bucket</label><input type="text" id="cfg-bucket" value="${escAttr(cfg.bucket)}" /></div>
+        <div class="field"><label>Endpoint-URL (leer = AWS S3)</label><input type="text" id="cfg-endpoint" placeholder="https://s3.eu-central-1.amazonaws.com" value="${escAttr(cfg.endpoint_url)}" /></div>
+        <div class="field"><label>Region</label><input type="text" id="cfg-region" placeholder="eu-central-1" value="${escAttr(cfg.region)}" /></div>
+        <div class="field"><label>Access Key</label><input type="text" id="cfg-access" value="${escAttr(cfg.access_key)}" /></div>
+        <div class="field"><label>Secret Key</label><input type="password" id="cfg-secret" value="${escAttr(cfg.secret_key)}" /></div>
+        <div class="field"><label>Präfix (optional)</label><input type="text" id="cfg-prefix" value="${escAttr(cfg.prefix)}" /></div>
+        <div class="field"><label>Adressierung</label><select id="cfg-addressing">
+          <option value="auto" ${!cfg.addressing_style || cfg.addressing_style === "auto" ? "selected" : ""}>Automatisch</option>
+          <option value="path" ${cfg.addressing_style === "path" ? "selected" : ""}>Pfad-Stil (MinIO, Server per IP)</option>
+          <option value="virtual" ${cfg.addressing_style === "virtual" ? "selected" : ""}>Virtual-Host-Stil</option></select></div>
+        <div class="field"><label>Speicherklasse (nur AWS)</label><select id="cfg-storage-class">
+          ${["STANDARD", "STANDARD_IA", "ONEZONE_IA", "INTELLIGENT_TIERING", "GLACIER_IR"].map((c) =>
+            `<option value="${c}" ${sc === c ? "selected" : ""}>${c}</option>`).join("")}</select>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">Andere Anbieter ignorieren das oder lehnen es ab - dort STANDARD lassen. Glacier Flexible/Deep Archive werden nicht angeboten, weil eine Wiederherstellung erst nach Stunden möglich wäre.</div></div>`;
+      const providerSel = fieldsEl.querySelector("#cfg-s3-provider");
+      const showHint = () => {
+        const p = S3_PRESETS[providerSel.value] || {};
+        fieldsEl.querySelector("#cfg-s3-hint").textContent = p.hint || "";
+      };
+      showHint();
+      providerSel.addEventListener("change", () => {
+        const p = S3_PRESETS[providerSel.value] || {};
+        const ep = fieldsEl.querySelector("#cfg-endpoint");
+        const rg = fieldsEl.querySelector("#cfg-region");
+        ep.value = p.endpoint || "";
+        ep.placeholder = p.endpointPlaceholder || "https://...";
+        rg.value = p.region || "";
+        rg.placeholder = p.regionPlaceholder || "";
+        fieldsEl.querySelector("#cfg-addressing").value = p.addressing || "auto";
+        if (providerSel.value !== "aws") fieldsEl.querySelector("#cfg-storage-class").value = "STANDARD";
+        showHint();
+      });
     } else if (type === "google_drive" || type === "onedrive") {
       const provider = type === "google_drive" ? "google" : "onedrive";
       const providerLabel = type === "google_drive" ? "Google Drive" : "OneDrive";
@@ -2419,6 +2513,153 @@ async function openStorageTargetModal(existing) {
         };
         window.addEventListener("message", onMessage);
       });
+    } else if (type === "sftp") {
+      fieldsEl.innerHTML = `
+        <p class="muted" style="font-size:.8rem; margin-top:0">Hetzner Storage Box: Host <code>uXXXXX.your-storagebox.de</code>, Port <b>23</b>. rsync.net und normale Linux-Server: Port 22.</p>
+        <div class="field"><label>Host</label><input type="text" id="cfg-host" placeholder="u123456.your-storagebox.de" value="${escAttr(cfg.host)}" /></div>
+        <div class="field"><label>Port</label><input type="text" id="cfg-port" value="${escAttr(cfg.port || "22")}" /></div>
+        <div class="field"><label>Benutzername</label><input type="text" id="cfg-username" value="${escAttr(cfg.username)}" /></div>
+        <div class="field"><label>Passwort (leer lassen bei Schlüssel-Anmeldung)</label><input type="password" id="cfg-password" value="${escAttr(cfg.password)}" /></div>
+        <div class="field"><label>Privater SSH-Schlüssel (optional, statt Passwort)</label>
+          <textarea id="cfg-private-key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----" style="width:100%; font-family:monospace; font-size:.75rem">${escHtml(cfg.private_key || "")}</textarea></div>
+        <div class="field"><label>Passphrase des Schlüssels (optional)</label><input type="password" id="cfg-key-passphrase" value="${escAttr(cfg.key_passphrase)}" />
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">rclone kann nur Schlüssel im alten PEM-Format entschlüsseln. Am einfachsten einen eigenen Schlüssel ohne Passphrase nur für Backups anlegen.</div></div>
+        <div class="field"><label>Host-Key (empfohlen)</label><input type="text" id="cfg-host-key" placeholder="ssh-ed25519 AAAAC3Nza..." value="${escAttr(cfg.host_key)}" />
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">Schützt vor gefälschten Servern. Ausgabe von <code>ssh-keyscan -p PORT HOST</code> einfügen. Leer = jeder Server-Schlüssel wird akzeptiert.</div></div>
+        <div class="field"><label>Zielordner</label><input type="text" id="cfg-path" placeholder="docker-backups" value="${escAttr(cfg.path)}" />
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">Ohne führenden Schrägstrich relativ zum Home-Verzeichnis.</div></div>`;
+    } else if (type === "webdav") {
+      const vendor = cfg.vendor || "nextcloud";
+      fieldsEl.innerHTML = `
+        <div class="field"><label>Anbieter</label><select id="cfg-webdav-preset">
+          ${Object.entries(WEBDAV_PRESETS).map(([k, p]) => `<option value="${k}" ${(cfg.preset || vendor) === k ? "selected" : ""}>${p.label}</option>`).join("")}
+        </select><div class="muted" id="cfg-webdav-hint" style="font-size:.75rem; margin-top:4px;"></div></div>
+        <div class="field"><label>WebDAV-URL</label><input type="text" id="cfg-url" placeholder="https://cloud.example.de/remote.php/dav/files/BENUTZER" value="${escAttr(cfg.url)}" /></div>
+        <div class="field"><label>Benutzername</label><input type="text" id="cfg-username" value="${escAttr(cfg.username)}" /></div>
+        <div class="field"><label>Passwort / App-Passwort</label><input type="password" id="cfg-password" value="${escAttr(cfg.password)}" /></div>
+        <div class="field"><label>Zielordner</label><input type="text" id="cfg-path" placeholder="docker-backups" value="${escAttr(cfg.path)}" /></div>`;
+      const sel = fieldsEl.querySelector("#cfg-webdav-preset");
+      const apply = (fill) => {
+        const p = WEBDAV_PRESETS[sel.value];
+        fieldsEl.querySelector("#cfg-webdav-hint").textContent = p.hint || "";
+        const url = fieldsEl.querySelector("#cfg-url");
+        url.placeholder = p.url || "https://...";
+        if (fill) url.value = p.fixedUrl || "";
+      };
+      apply(false);
+      sel.addEventListener("change", () => apply(true));
+    } else if (type === "ftp") {
+      const tls = cfg.tls || "explicit";
+      fieldsEl.innerHTML = `
+        <p class="muted" style="font-size:.8rem; margin-top:0">Fritz!Box: Host <code>192.168.178.1</code> (oder fritz.box), Benutzer und Passwort eines FRITZ!Box-Benutzers mit NAS-Recht, TLS „explizit" und Zertifikatsprüfung aus (die Fritz!Box nutzt ein selbst signiertes Zertifikat).</p>
+        <div class="field"><label>Host</label><input type="text" id="cfg-host" placeholder="192.168.178.1" value="${escAttr(cfg.host)}" /></div>
+        <div class="field"><label>Port</label><input type="text" id="cfg-port" value="${escAttr(cfg.port || "21")}" /></div>
+        <div class="field"><label>Benutzername</label><input type="text" id="cfg-username" value="${escAttr(cfg.username)}" /></div>
+        <div class="field"><label>Passwort</label><input type="password" id="cfg-password" value="${escAttr(cfg.password)}" /></div>
+        <div class="field"><label>Verschlüsselung</label><select id="cfg-tls">
+          <option value="explicit" ${tls === "explicit" ? "selected" : ""}>FTPS explizit (empfohlen)</option>
+          <option value="implicit" ${tls === "implicit" ? "selected" : ""}>FTPS implizit (Port 990)</option>
+          <option value="none" ${tls === "none" ? "selected" : ""}>Keine - Passwort und Daten unverschlüsselt!</option></select></div>
+        <div class="field"><label><input type="checkbox" id="cfg-skip-cert" ${cfg.skip_cert_check ? "checked" : ""} /> Zertifikat nicht prüfen (nur für selbst signierte Zertifikate im eigenen Netz)</label></div>
+        <div class="field"><label>Zielordner</label><input type="text" id="cfg-path" placeholder="USB-Stick/docker-backups" value="${escAttr(cfg.path)}" /></div>`;
+    } else if (type === "azure_blob") {
+      const tier = cfg.access_tier || "";
+      fieldsEl.innerHTML = `
+        <div class="field"><label>Speicherkonto (Account-Name)</label><input type="text" id="cfg-account" value="${escAttr(cfg.account)}" /></div>
+        <div class="field"><label>Zugriffsschlüssel (Access Key)</label><input type="password" id="cfg-key" value="${escAttr(cfg.key)}" /></div>
+        <div class="field"><label>oder SAS-URL (statt Konto + Schlüssel)</label><input type="password" id="cfg-sas" placeholder="https://konto.blob.core.windows.net/container?sv=..." value="${escAttr(cfg.sas_url)}" /></div>
+        <div class="field"><label>Container</label><input type="text" id="cfg-container" placeholder="docker-backups" value="${escAttr(cfg.container)}" /></div>
+        <div class="field"><label>Präfix (optional)</label><input type="text" id="cfg-prefix" value="${escAttr(cfg.prefix)}" /></div>
+        <div class="field"><label>Zugriffsebene</label><select id="cfg-tier">
+          <option value="" ${!tier ? "selected" : ""}>Standard des Kontos</option>
+          <option value="hot" ${tier === "hot" ? "selected" : ""}>Hot</option>
+          <option value="cool" ${tier === "cool" ? "selected" : ""}>Cool</option>
+          <option value="cold" ${tier === "cold" ? "selected" : ""}>Cold</option></select>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">„Archive" wird bewusst nicht angeboten: archivierte Daten brauchen Stunden, bevor eine Wiederherstellung starten kann.</div></div>`;
+    } else if (type === "dropbox") {
+      const connected = cfg.connected || dropboxPending;
+      fieldsEl.innerHTML = `
+        <details ${cfg.app_key ? "" : "open"}><summary style="cursor:pointer; font-weight:600">Einmalig: eigene Dropbox-App anlegen</summary>
+          <ol class="muted" style="font-size:.8rem; padding-left:18px">
+            <li><a href="https://www.dropbox.com/developers/apps/create" target="_blank" rel="noopener">dropbox.com/developers/apps</a> öffnen, „Scoped access" und „App folder" (oder „Full Dropbox") wählen.</li>
+            <li>Unter <i>Permissions</i> <code>files.content.write</code>, <code>files.content.read</code> und <code>account_info.read</code> aktivieren und speichern.</li>
+            <li>Unter <i>Settings</i> App key und App secret kopieren und unten eintragen.</li>
+          </ol></details>
+        <div class="field"><label>App-Key</label><input type="text" id="cfg-app-key" value="${escAttr(cfg.app_key)}" /></div>
+        <div class="field"><label>App-Secret</label><input type="password" id="cfg-app-secret" value="${escAttr(cfg.app_secret)}" /></div>
+        <div class="field"><label>Anmeldung</label>
+          <div>${connected ? `<span class="badge ok">✓ Verbunden${escHtml((dropboxPending && dropboxPending.account) || cfg.account ? " mit " + ((dropboxPending && dropboxPending.account) || cfg.account) : "")}</span>` : '<span class="badge neutral">nicht verbunden</span>'}</div>
+          <ol class="muted" style="font-size:.8rem; padding-left:18px; margin-bottom:6px">
+            <li><button type="button" class="btn" id="dbx-open-btn">Bei Dropbox anmelden</button> - öffnet Dropbox in einem neuen Fenster.</li>
+            <li>Zugriff erlauben und den angezeigten Code hier einfügen:</li>
+          </ol>
+          <div style="display:flex; gap:8px;"><input type="text" id="dbx-code" placeholder="Code von Dropbox" style="flex:1" />
+            <button type="button" class="btn primary" id="dbx-exchange-btn">Verbinden</button></div></div>
+        <div class="field"><label>Zielordner</label><input type="text" id="cfg-folder-path" placeholder="docker-backups" value="${escAttr(cfg.folder_path)}" /></div>`;
+      fieldsEl.querySelector("#dbx-open-btn").addEventListener("click", async () => {
+        try {
+          const r = await api("/api/settings/dropbox/auth-url", { method: "POST", body: JSON.stringify({ app_key: fieldsEl.querySelector("#cfg-app-key").value.trim() }) });
+          window.open(r.url, "dbm-dropbox", "width=600,height=700");
+        } catch (e) { toast(e.message, "error"); }
+      });
+      fieldsEl.querySelector("#dbx-exchange-btn").addEventListener("click", async () => {
+        const btn = fieldsEl.querySelector("#dbx-exchange-btn");
+        btn.disabled = true;
+        try {
+          const appKey = fieldsEl.querySelector("#cfg-app-key").value.trim();
+          const appSecret = fieldsEl.querySelector("#cfg-app-secret").value;
+          const r = await api("/api/settings/dropbox/exchange", { method: "POST", body: JSON.stringify({
+            app_key: appKey, app_secret: appSecret,
+            code: fieldsEl.querySelector("#dbx-code").value.trim(), target_id: existing ? existing.id : null,
+          }) });
+          dropboxPending = { pending_id: r.pending_id, account: r.account };
+          toast("Mit Dropbox verbunden - Speichern nicht vergessen");
+          renderFields(type, { ...cfg, app_key: appKey, app_secret: appSecret, folder_path: fieldsEl.querySelector("#cfg-folder-path").value });
+        } catch (e) { toast(e.message, "error"); btn.disabled = false; }
+      });
+    } else if (type === "rclone_cloud") {
+      const provider = cfg.provider || "pcloud";
+      fieldsEl.innerHTML = `
+        <div class="field"><label>Dienst</label><select id="cfg-cloud-provider">
+          <option value="pcloud">pCloud</option>
+          <option value="box">Box</option>
+          <option value="mega">Mega</option>
+          <option value="koofr">Koofr</option>
+          <option value="storj">Storj</option>
+          <option value="custom">Anderes rclone-Backend (Experten)</option>
+        </select></div>
+        <div id="cfg-cloud-fields"></div>
+        <div class="field"><label>Zielordner</label><input type="text" id="cfg-path" placeholder="docker-backups" value="${escAttr(cfg.path)}" /></div>`;
+      const sel = fieldsEl.querySelector("#cfg-cloud-provider");
+      sel.value = provider;
+      const sub = fieldsEl.querySelector("#cfg-cloud-fields");
+      const tokenHelp = (name) => `<div class="muted" style="font-size:.75rem; margin-top:4px;">Auf einem Rechner mit Browser <a href="https://rclone.org/downloads/" target="_blank" rel="noopener">rclone</a> installieren und <code>rclone authorize "${name}"</code> ausführen. Nach der Anmeldung die ausgegebene JSON-Zeile <code>{"access_token":...}</code> komplett hier einfügen.</div>`;
+      const renderSub = () => {
+        const p = sel.value;
+        const same = p === provider;
+        const v = (k) => same ? escAttr(cfg[k]) : "";
+        if (p === "pcloud") sub.innerHTML = `
+          <div class="field"><label>Region</label><select id="cfg-hostname">
+            <option value="eapi.pcloud.com" ${!same || cfg.hostname !== "api.pcloud.com" ? "selected" : ""}>EU (Luxemburg)</option>
+            <option value="api.pcloud.com" ${same && cfg.hostname === "api.pcloud.com" ? "selected" : ""}>USA</option></select></div>
+          <div class="field"><label>Token</label><input type="password" id="cfg-token" value="${v("token")}" />${tokenHelp("pcloud")}</div>`;
+        else if (p === "box") sub.innerHTML = `
+          <div class="field"><label>Token</label><input type="password" id="cfg-token" value="${v("token")}" />${tokenHelp("box")}</div>`;
+        else if (p === "mega" || p === "koofr") sub.innerHTML = `
+          <div class="field"><label>E-Mail</label><input type="text" id="cfg-username" value="${v("username")}" /></div>
+          <div class="field"><label>${p === "koofr" ? "App-Passwort (Koofr: Einstellungen > Passwörter)" : "Passwort"}</label><input type="password" id="cfg-password" value="${v("password")}" /></div>
+          ${p === "mega" ? '<div class="muted" style="font-size:.75rem">Zwei-Faktor-Anmeldung muss für dieses Mega-Konto ausgeschaltet sein.</div>' : ""}`;
+        else if (p === "storj") sub.innerHTML = `
+          <div class="field"><label>Access Grant</label><input type="password" id="cfg-access-grant" value="${v("access_grant")}" />
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">In der Storj-Konsole unter <i>Access Keys</i> einen Zugang vom Typ „Access Grant" erzeugen.</div></div>`;
+        else sub.innerHTML = `
+          <div class="field"><label>rclone-Backend</label><input type="text" id="cfg-backend" placeholder="z. B. b2, swift, seafile, sharefile" value="${v("backend")}" /></div>
+          <div class="field"><label>Optionen (eine pro Zeile: schluessel = wert)</label>
+            <textarea id="cfg-options" rows="5" style="width:100%; font-family:monospace; font-size:.8rem" placeholder="account = ...&#10;key = ...">${same ? escHtml(cfg.options || "") : ""}</textarea>
+            <div class="muted" style="font-size:.75rem; margin-top:4px;">Namen wie in der <a href="https://rclone.org/overview/" target="_blank" rel="noopener">rclone-Dokumentation</a>. Werte für <code>pass</code>/<code>password</code> werden automatisch verschleiert. Beim Bearbeiten erscheinen gespeicherte Optionen als ***; zum Ändern alle Zeilen neu eingeben.</div></div>`;
+      };
+      renderSub();
+      sel.addEventListener("change", renderSub);
     } else {
       fieldsEl.innerHTML = `
         <div class="field"><label>rclone Remote-Name (aus rclone.conf)</label><input type="text" id="cfg-remote" placeholder="mein-sftp" value="${cfg.remote || ""}" /></div>
@@ -2437,6 +2678,7 @@ async function openStorageTargetModal(existing) {
 
   function readConfig() {
     const type = overlay.querySelector("#t-type").value;
+    const q = (sel) => overlay.querySelector(sel);
     let config = {};
     if (type === "smb") config = {
       server: overlay.querySelector("#cfg-server").value.trim(),
@@ -2449,6 +2691,9 @@ async function openStorageTargetModal(existing) {
     };
     else if (type === "local_path") config = { path: overlay.querySelector("#cfg-path").value.trim() };
     else if (type === "s3") config = {
+      provider: overlay.querySelector("#cfg-s3-provider").value,
+      addressing_style: overlay.querySelector("#cfg-addressing").value,
+      storage_class: overlay.querySelector("#cfg-storage-class").value,
       bucket: overlay.querySelector("#cfg-bucket").value.trim(),
       endpoint_url: overlay.querySelector("#cfg-endpoint").value.trim(),
       region: overlay.querySelector("#cfg-region").value.trim(),
@@ -2459,6 +2704,48 @@ async function openStorageTargetModal(existing) {
     else if (type === "google_drive" || type === "onedrive") config = {
       folder_path: overlay.querySelector("#cfg-folder-path").value.trim(),
     };
+    else if (type === "sftp") config = {
+      host: q("#cfg-host").value.trim(), port: q("#cfg-port").value.trim() || "22",
+      username: q("#cfg-username").value.trim(), password: q("#cfg-password").value,
+      private_key: q("#cfg-private-key").value.trim(), key_passphrase: q("#cfg-key-passphrase").value,
+      host_key: q("#cfg-host-key").value.trim(), path: q("#cfg-path").value.trim(),
+    };
+    else if (type === "webdav") {
+      const preset = q("#cfg-webdav-preset").value;
+      config = {
+        preset, vendor: (WEBDAV_PRESETS[preset] || {}).vendor || "other",
+        url: q("#cfg-url").value.trim(), username: q("#cfg-username").value.trim(),
+        password: q("#cfg-password").value, path: q("#cfg-path").value.trim(),
+      };
+    }
+    else if (type === "ftp") config = {
+      host: q("#cfg-host").value.trim(), port: q("#cfg-port").value.trim() || "21",
+      username: q("#cfg-username").value.trim(), password: q("#cfg-password").value,
+      tls: q("#cfg-tls").value, skip_cert_check: q("#cfg-skip-cert").checked, path: q("#cfg-path").value.trim(),
+    };
+    else if (type === "azure_blob") config = {
+      account: q("#cfg-account").value.trim(), key: q("#cfg-key").value.trim(), sas_url: q("#cfg-sas").value.trim(),
+      container: q("#cfg-container").value.trim(), prefix: q("#cfg-prefix").value.trim(), access_tier: q("#cfg-tier").value,
+    };
+    else if (type === "dropbox") {
+      config = {
+        app_key: q("#cfg-app-key").value.trim(), app_secret: q("#cfg-app-secret").value,
+        folder_path: q("#cfg-folder-path").value.trim(),
+      };
+      if (dropboxPending) config.pending_id = dropboxPending.pending_id;
+    }
+    else if (type === "rclone_cloud") {
+      const provider = q("#cfg-cloud-provider").value;
+      config = { provider, path: q("#cfg-path").value.trim() };
+      const opt = (sel, key, trim = true) => { const el = q(sel); if (el) config[key] = trim ? el.value.trim() : el.value; };
+      opt("#cfg-hostname", "hostname");
+      opt("#cfg-token", "token");
+      opt("#cfg-username", "username");
+      opt("#cfg-password", "password", false);
+      opt("#cfg-access-grant", "access_grant");
+      opt("#cfg-backend", "backend");
+      opt("#cfg-options", "options", false);
+    }
     else config = {
       remote: overlay.querySelector("#cfg-remote").value.trim(),
       remote_path: overlay.querySelector("#cfg-remote-path").value.trim(),
@@ -2480,7 +2767,7 @@ async function openStorageTargetModal(existing) {
     btn.disabled = true;
     btn.textContent = "Teste...";
     try {
-      await api("/api/settings/storage-targets/test", { method: "POST", body: JSON.stringify({ type, config }) });
+      await api("/api/settings/storage-targets/test", { method: "POST", body: JSON.stringify({ type, config, target_id: existing ? existing.id : null }) });
       toast("Verbindung erfolgreich");
     } catch (e) {
       toast(e.message, "error");
@@ -2514,6 +2801,10 @@ async function openStorageTargetModal(existing) {
       }
     }
 
+    if (type === "dropbox" && !dropboxPending && !(existing && existing.type === "dropbox" && existing.config.connected)) {
+      toast("Bitte zuerst bei Dropbox anmelden und den Code verbinden", "error");
+      return;
+    }
     const payload = { name, type, config, enabled: existing ? existing.enabled : true };
     try {
       if (existing) {

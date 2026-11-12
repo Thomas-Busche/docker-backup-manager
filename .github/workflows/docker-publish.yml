@@ -27,6 +27,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements-dev.txt
 
+      # Real rclone + restic binaries, so tests/test_connectors_real_rclone.py
+      # exercises SFTP/WebDAV/FTP targets against real local servers.
+      - name: Install rclone and restic
+        run: sudo apt-get update && sudo apt-get install -y rclone restic
+
       - name: Run tests
         run: python -m pytest -q
 
