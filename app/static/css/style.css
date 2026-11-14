@@ -59,6 +59,16 @@ button, input, select { font-family: inherit; font-size: inherit; }
   padding: 32px; box-shadow: var(--shadow);
 }
 .auth-card h1 { font-size: 1.3rem; margin: 0 0 4px; }
+/* BuscheHome-Logo: dunkler Kreis hinter dem Logo, damit der weiße Schriftzug auch im Light-Mode lesbar ist */
+.bh-logo { display: block; flex-shrink: 0; border-radius: 50%; background: #0f1420; object-fit: contain; }
+.bh-byline { display: block; font-size: .7rem; font-weight: 500; color: var(--text-dim); opacity: .8; letter-spacing: .02em; text-decoration: none; }
+.auth-brand { display: flex; justify-content: center; margin: -8px 0 14px; }
+.auth-card h1 { text-align: center; }
+.auth-card p.sub { text-align: center; }
+.auth-foot { margin-top: 18px; text-align: center; }
+.auth-foot .bh-byline { display: inline; }
+.about-card { display: flex; align-items: center; gap: 16px; }
+.about-text { min-width: 0; }
 .auth-card p.sub { color: var(--text-dim); margin: 0 0 20px; font-size: .9rem; }
 .field { margin-bottom: 14px; }
 .field label { display: block; font-size: .8rem; color: var(--text-dim); margin-bottom: 6px; }
@@ -85,7 +95,9 @@ button, input, select { font-family: inherit; font-size: inherit; }
   width: 220px; flex-shrink: 0; background: var(--bg-elev); border-right: 1px solid var(--border);
   padding: 20px 14px; display: flex; flex-direction: column; gap: 4px;
 }
-.sidebar .brand { font-weight: 700; font-size: 1.05rem; padding: 6px 10px 22px; }
+.sidebar .brand { font-weight: 700; font-size: 1.05rem; padding: 6px 6px 22px; display: flex; align-items: center; gap: 10px; }
+.sidebar .brand-text { min-width: 0; line-height: 1.25; font-size: .95rem; white-space: nowrap; }
+.sidebar .brand-text > div:first-child { overflow: hidden; text-overflow: ellipsis; }
 .sidebar .nav-item {
   padding: 10px 12px; border-radius: 8px; color: var(--text-dim); cursor: pointer; font-size: .92rem;
   display: flex; align-items: center; gap: 10px;
@@ -228,6 +240,9 @@ td.cell-actions .btn { white-space: nowrap; }
 /* ── Tablet ── */
 @media (max-width: 1000px) {
   .sidebar { width: 190px; }
+  .sidebar .brand { padding-left: 2px; padding-right: 0; gap: 8px; }
+  .sidebar .brand .bh-logo { width: 28px; height: 28px; }
+  .sidebar .brand-text { font-size: .86rem; }
   .main { padding: 22px 20px; }
   td .btn, .cell-actions .btn { padding: 7px 11px; }
 }
@@ -245,7 +260,8 @@ td.cell-actions .btn { white-space: nowrap; }
     padding: 8px 14px; padding-top: calc(8px + env(safe-area-inset-top, 0px));
     background: var(--bg-elev); border-bottom: 1px solid var(--border);
   }
-  .mobile-topbar .brand { font-weight: 700; font-size: 1rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mobile-topbar .brand { font-weight: 700; font-size: 1rem; white-space: nowrap; overflow: hidden; display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .mobile-topbar .brand span { overflow: hidden; text-overflow: ellipsis; }
   .mobile-topbar-actions { display: flex; gap: 8px; flex-shrink: 0; }
   .mobile-user-menu {
     position: absolute; top: calc(100% + 6px); right: 14px; width: 220px;
