@@ -1,3 +1,5 @@
+<p align="right"><img src="app/static/img/buschehome-logo-128.webp" width="96" height="96" alt="BuscheHome-Logo" /></p>
+
 # Docker Backup Manager
 
 > **Version 1.5.1** — webbasiertes Backup- und Restore-Tool für Docker-Container
@@ -57,6 +59,7 @@ Das Tool spricht ausschließlich mit der **Docker Engine API** (über den Docker
 - [Logs](#logs)
 - [Umgebungsvariablen – Referenz](#umgebungsvariablen--referenz)
 - [Entwicklung & Tests](#entwicklung--tests)
+- [Autor, Marke & Lizenzhinweis](#autor-marke--lizenzhinweis)
 
 ---
 
@@ -714,5 +717,16 @@ app/
 │   └── logs.py          Ereignislog-Abfrage
 └── static/
     ├── index.html       Single-Page-App Shell
+    ├── img/             BuscheHome-Logo und Favicons (siehe NOTICE)
     └── js/app.js        Gesamtes Frontend (vanilla JS, kein Build-Schritt)
 ```
+
+---
+
+## Autor, Marke & Lizenzhinweis
+
+Docker Backup Manager wird von **Thomas Busche** unter dem Namen **BuscheHome** entwickelt.
+
+Der Name „BuscheHome“ und das BuscheHome-Logo (Dateien unter `app/static/img/`) sind Marken bzw. Kennzeichen des Autors. Sie sind **nicht** Teil der Open-Source-Lizenz des Quellcodes: Den Code darfst du im Rahmen der Lizenz nutzen, ändern und weitergeben, Name und Logo aber nicht für eigene Projekte, Forks oder Produkte verwenden oder so einsetzen, dass der Eindruck entsteht, sie stammten von BuscheHome oder seien von BuscheHome unterstützt. Wer einen veränderten Fork veröffentlicht, entfernt bitte Logo und Namen bzw. ersetzt sie durch eigene. Ein sachlicher Hinweis auf die Herkunft („basiert auf Docker Backup Manager von BuscheHome“) ist ausdrücklich erwünscht.
+
+Details stehen in der Datei [NOTICE](NOTICE).

@@ -361,16 +361,27 @@ function render(el) {
 }
 
 // ---------- Auth screens ----------
+// BuscheHome-Logo (Marke des Autors). Runder dunkler Hintergrund, damit der weiße
+// Schriftzug auch im hellen Farbschema lesbar bleibt.
+function brandLogo(px, cls = "") {
+  const src = px > 40 ? "/assets/img/buschehome-logo-128.webp" : "/assets/img/buschehome-logo-64.webp";
+  const src2x = px > 40 ? "/assets/img/buschehome-logo-256.webp" : "/assets/img/buschehome-logo-128.webp";
+  return `<img class="bh-logo ${cls}" src="${src}" srcset="${src} 1x, ${src2x} 2x" width="${px}" height="${px}" alt="BuscheHome" decoding="async" />`;
+}
+const BUSCHEHOME_BYLINE = `<span class="bh-byline" title="Docker Backup Manager wird von Thomas Busche (BuscheHome) entwickelt">by BuscheHome</span>`;
+
 function loginScreen() {
   const wrap = h(`
     <div class="center-screen">
       <div class="auth-card">
+        <div class="auth-brand">${brandLogo(72)}</div>
         <h1>Docker Backup Manager</h1>
         <p class="sub">Melde dich an, um fortzufahren</p>
         <div class="field"><label>Benutzername</label><input type="text" id="login-user" /></div>
         <div class="field"><label>Passwort</label><input type="password" id="login-pass" /></div>
         <button class="btn primary block" id="login-btn">Anmelden</button>
         <div class="error-msg" id="login-error"></div>
+        <div class="auth-foot">${BUSCHEHOME_BYLINE}</div>
       </div>
     </div>
   `);
@@ -391,12 +402,14 @@ function setupScreen() {
   const wrap = h(`
     <div class="center-screen">
       <div class="auth-card">
+        <div class="auth-brand">${brandLogo(72)}</div>
         <h1>Willkommen</h1>
         <p class="sub">Erstelle das erste Administrator-Konto</p>
         <div class="field"><label>Benutzername</label><input type="text" id="su-user" /></div>
         <div class="field"><label>Passwort (min. 8 Zeichen)</label><input type="password" id="su-pass" /></div>
         <button class="btn primary block" id="su-btn">Konto erstellen</button>
         <div class="error-msg" id="su-error"></div>
+        <div class="auth-foot">${BUSCHEHOME_BYLINE}</div>
       </div>
     </div>
   `);
@@ -427,13 +440,16 @@ function shell(activeKey, contentEl) {
   const wrap = h(`
     <div style="display:flex; width:100%;">
       <div class="sidebar">
-        <div class="brand">🐳 Backup Manager</div>
+        <div class="brand">
+          ${brandLogo(32)}
+          <div class="brand-text"><div>Backup Manager</div>${BUSCHEHOME_BYLINE}</div>
+        </div>
         <div id="nav"></div>
         <div class="spacer"></div>
         <div class="user-row" id="user-row"></div>
       </div>
       <header class="mobile-topbar">
-        <div class="brand">🐳 Backup Manager</div>
+        <div class="brand">${brandLogo(26)}<span>Backup Manager</span></div>
         <div class="mobile-topbar-actions">
           <button type="button" class="icon-btn" id="m-theme-toggle" title="Dark / Light" aria-label="Farbschema wechseln">🌓</button>
           <button type="button" class="icon-btn" id="m-user-btn" aria-label="Benutzermenü" aria-expanded="false">👤</button>
@@ -1735,6 +1751,17 @@ async function settingsPage() {
         <thead><tr><th>Name</th><th>Typ</th><th>Status</th><th>Letzter Sync</th><th></th></tr></thead>
         <tbody id="targets-tbody"></tbody>
       </table>
+    </div>
+
+    <div class="section-title">Über</div>
+    <div class="card about-card">
+      ${brandLogo(64)}
+      <div class="about-text">
+        <div style="font-weight:600;">Docker Backup Manager <span class="muted" style="font-weight:400;">v${escHtml(overview.app_version || "")}</span></div>
+        <div class="muted" style="font-size:.85rem; margin-top:2px;">Entwickelt von Thomas Busche · BuscheHome</div>
+        <div style="font-size:.85rem; margin-top:6px;"><a href="https://github.com/Sirbuschi2003/docker-backup-manager" target="_blank" rel="noopener">Quellcode auf GitHub</a></div>
+        <div class="muted" style="font-size:.74rem; margin-top:8px;">„BuscheHome“ und das BuscheHome-Logo sind Marken des Autors und nicht Teil der Open-Source-Lizenz des Quellcodes.</div>
+      </div>
     </div>
   </div>`);
 
