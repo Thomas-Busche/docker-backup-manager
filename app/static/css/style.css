@@ -67,6 +67,7 @@ button, input, select { font-family: inherit; font-size: inherit; }
 .auth-card p.sub { text-align: center; }
 .auth-foot { margin-top: 18px; text-align: center; }
 .auth-foot .bh-byline { display: inline; }
+.bh-byline:hover { color: var(--accent); opacity: 1; text-decoration: underline; }
 .about-card { display: flex; align-items: center; gap: 16px; }
 .about-text { min-width: 0; }
 .auth-card p.sub { color: var(--text-dim); margin: 0 0 20px; font-size: .9rem; }
