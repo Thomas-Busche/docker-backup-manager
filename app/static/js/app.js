@@ -368,7 +368,8 @@ function brandLogo(px, cls = "") {
   const src2x = px > 40 ? "/assets/img/buschehome-logo-256.webp" : "/assets/img/buschehome-logo-128.webp";
   return `<img class="bh-logo ${cls}" src="${src}" srcset="${src} 1x, ${src2x} 2x" width="${px}" height="${px}" alt="BuscheHome" decoding="async" />`;
 }
-const BUSCHEHOME_BYLINE = `<span class="bh-byline" title="Docker Backup Manager wird von Thomas Busche (BuscheHome) entwickelt">by BuscheHome</span>`;
+const BUSCHEHOME_URL = "https://www.buschehome.de";
+const BUSCHEHOME_BYLINE = `<a class="bh-byline" href="${BUSCHEHOME_URL}" target="_blank" rel="noopener" title="Docker Backup Manager wird von Thomas Busche (BuscheHome) entwickelt – www.buschehome.de">by BuscheHome</a>`;
 
 function loginScreen() {
   const wrap = h(`
@@ -1758,7 +1759,7 @@ async function settingsPage() {
       ${brandLogo(64)}
       <div class="about-text">
         <div style="font-weight:600;">Docker Backup Manager <span class="muted" style="font-weight:400;">v${escHtml(overview.app_version || "")}</span></div>
-        <div class="muted" style="font-size:.85rem; margin-top:2px;">Entwickelt von Thomas Busche · BuscheHome</div>
+        <div class="muted" style="font-size:.85rem; margin-top:2px;">Entwickelt von Thomas Busche · <a href="${BUSCHEHOME_URL}" target="_blank" rel="noopener">BuscheHome</a></div>
         <div style="font-size:.85rem; margin-top:6px;"><a href="https://github.com/Sirbuschi2003/docker-backup-manager" target="_blank" rel="noopener">Quellcode auf GitHub</a></div>
         <div class="muted" style="font-size:.74rem; margin-top:8px;">Quellcode unter GPL-3.0. „BuscheHome“ und das BuscheHome-Logo sind Marken des Autors und nicht Teil dieser Lizenz.</div>
       </div>
