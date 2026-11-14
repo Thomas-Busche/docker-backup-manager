@@ -140,9 +140,12 @@ def sync_local_path(backup_path: Path, config: dict) -> None:
     dest_root = Path(config["path"])
     dest = dest_root / _relative_key(backup_path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
-        shutil.rmtree(dest)
-    shutil.copytree(backup_path, dest)
+    # Merge into an existing folder instead of replacing it: for a backup whose
+    # image/volumes were streamed straight to this target, the folder already
+    # holds image.tar (and volume archives) that the local copy doesn't have -
+    # wiping it first deleted exactly the data a restore needs. Same semantics
+    # as the S3/SMB/rclone uploads, which also only add/overwrite files.
+    shutil.copytree(backup_path, dest, dirs_exist_ok=True)
 
 
 def sync_s3(backup_path: Path, config: dict) -> None:
@@ -729,6 +732,40 @@ def _sync_to_targets(backup_path: Path, target_ids: Optional[list[int]], on_prog
     finally:
         db.close()
     return results
+
+
+def sync_backup_with_members(backup_path: Path, member_paths: list, target_ids: Optional[list[int]],
+                             stream_target=None, on_progress=None) -> tuple[list[dict], dict[str, list[int]]]:
+    """Uploads a finished backup to its storage targets - for a landscape
+    backup that includes every member container backup, not just the small
+    _landscapes/<label>/<ts> folder that links them. Without the members the
+    target only held the link folder, so a landscape could never be restored
+    from it on another machine (the catalog import found no containers).
+
+    If volumes were streamed to stream_target and that target isn't one of
+    the selected ones, the metadata folders (meta.json, container.json, ...)
+    are copied there too, so a catalog import on a new host finds them.
+
+    target_ids=None means "all enabled targets". Never raises. Returns the
+    sync results for backup_path and, per member path, the target ids it was
+    uploaded to."""
+    member_synced: dict[str, list[int]] = {}
+    for member_path in member_paths:
+        res = _sync_to_targets(Path(member_path), target_ids, on_progress)
+        member_synced[str(member_path)] = [r["target_id"] for r in res if r["ok"]]
+    results = _sync_to_targets(Path(backup_path), target_ids, on_progress)
+
+    if stream_target:
+        st_type, st_config_json, st_id = stream_target
+        main_ok = [r["target_id"] for r in results if r["ok"]]
+        for path, ok_ids in [(str(backup_path), main_ok), *member_synced.items()]:
+            if st_id in ok_ids or not Path(path).exists():
+                continue
+            try:
+                sync_to_target(Path(path), st_type, st_config_json)
+            except Exception:  # noqa: BLE001
+                logger.exception("Metadaten-Upload zum Streaming-Ziel fehlgeschlagen für %s", path)
+    return results, member_synced
 
 
 def check_target_connection(target_type: str, config_json: str) -> None:

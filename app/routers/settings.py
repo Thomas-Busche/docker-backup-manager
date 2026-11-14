@@ -460,6 +460,18 @@ def import_catalog_from_target(target_id: int, db: Session = Depends(get_db), us
                     and containers):
                 existing.containers_json = json.dumps(containers)
                 updated += 1
+            elif (existing.streamed_target_id not in (None, target.id)
+                  and (entry.get("size_bytes") or 0) > (existing.size_bytes or 0)):
+                # The same version was already imported from another target,
+                # but that copy is smaller: it only holds the metadata (for a
+                # streamed backup, meta.json etc. are copied to every selected
+                # target while image and volume data live only on the
+                # streaming target). Point the record at the copy that has the
+                # data, or the restore later fails ("repository does not
+                # exist") depending on which target happened to be imported first.
+                existing.streamed_target_id = target.id
+                existing.size_bytes = entry["size_bytes"]
+                updated += 1
             else:
                 skipped += 1
             continue

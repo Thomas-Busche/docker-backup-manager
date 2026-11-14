@@ -85,10 +85,8 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
             def upload_progress(label, idx, total):
                 job_tracker.update_progress(job_id, 1, label, 1)
 
-            if storage_target_ids is None:
-                sync_results = storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
-            else:
-                sync_results = storage_sync.sync_to_selected_targets(result.path, storage_target_ids, on_progress=upload_progress)
+            sync_results, _ = storage_sync.sync_backup_with_members(
+                result.path, [], storage_target_ids, stream_target=stream_target, on_progress=upload_progress)
             record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
             db.commit()
 

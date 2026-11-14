@@ -87,13 +87,16 @@ def run_schedule(schedule_id: int):
             # directory with real data (image, volumes) - without its own
             # record it'd be invisible in the UI, never deletable, and never
             # subject to retention, even though it still takes up disk space.
+            member_records = []
             for member in result.member_results:
-                db.add(BackupRecord(
+                member_record = BackupRecord(
                     backup_type="container", name=member.name, path=str(member.path),
                     status="ok" if member.ok else "failed", error=member.error,
                     size_bytes=member.size_bytes, containers_json=json.dumps([member.name]),
                     streamed_target_id=member.streamed_target_id,
-                ))
+                )
+                db.add(member_record)
+                member_records.append(member_record)
             db.commit()
 
             if result.ok:
@@ -101,34 +104,16 @@ def run_schedule(schedule_id: int):
                     progress(1, label, 1)
 
                 target_ids = json.loads(sched.storage_target_ids or "[]")
-                sync_results = storage_sync.sync_to_selected_targets(result.path, target_ids, on_progress=upload_progress)
-
-                # When volumes are streamed via restic to a stream_target, the local
-                # backup_dir only holds meta.json / container.json / networks.json — these
-                # are never part of the restic repo, so the stream_target ends up without
-                # a meta.json marker. Without that marker the catalog-import scan finds
-                # nothing on that target. Fix: also sync the metadata dir(s) to the
-                # stream_target so it always has a meta.json for catalog discovery.
-                if stream_target:
-                    st_type, st_config_json, st_id = stream_target
-                    # When stream_target is not also a regular storage target, the
-                    # result dir was never uploaded there — do it now for catalog discovery.
-                    if st_id not in target_ids:
-                        try:
-                            storage_sync.sync_to_target(result.path, st_type, st_config_json)
-                        except Exception:
-                            logger.exception("Meta-sync result dir to stream target failed for %s", result.path)
-                    # Member dirs must ALWAYS go to the stream target — sync_to_selected_targets
-                    # only uploads result.path (the landscape dir), never the individual member
-                    # backup dirs. Without their meta.json the catalog scan finds 0 containers.
-                    for m in result.member_results:
-                        if m.ok and m.path and m.path.exists():
-                            try:
-                                storage_sync.sync_to_target(m.path, st_type, st_config_json)
-                            except Exception:
-                                logger.exception("Meta-sync member dir to stream target failed for %s", m.path)
-
+                # Uploads the member container backups of a landscape too, and
+                # copies the metadata folders to the streaming target so a
+                # catalog import on a new host finds them (see storage_sync).
+                ok_members = [m for m in member_records if m.status == "ok" and Path(m.path).exists()]
+                sync_results, member_synced = storage_sync.sync_backup_with_members(
+                    result.path, [m.path for m in ok_members], target_ids,
+                    stream_target=stream_target, on_progress=upload_progress)
                 record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
+                for m in ok_members:
+                    m.synced_target_ids = json.dumps(member_synced.get(m.path, []))
                 db.commit()
 
             if result.cancelled:

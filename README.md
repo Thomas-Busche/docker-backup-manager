@@ -379,6 +379,12 @@ Landscape-Backups ermöglichen zwei Modi:
 
 > Hinweis: Google Drive / OneDrive werden als Quelle für den Katalog-Import nicht unterstützt — dort Variante B nutzen.
 
+**Was auf dem neuen Host gebraucht wird:**
+- Bei verschlüsselten Backups **derselbe `DBM_ENCRYPTION_KEY`** wie auf dem alten Host (ohne ihn bricht die Wiederherstellung mit einem Hinweis ab).
+- Liegen dieselben Versionen auf mehreren Zielen (z. B. Streaming-Ziel plus NAS), einfach alle Ziele importieren — die App verknüpft jede Version automatisch mit dem Ziel, auf dem die Daten tatsächlich liegen.
+- Images, Volumes (inkl. Compose-Labels), Bind-Mounts (landen unter `/data/bind_mounts/…`, wenn der Original-Pfad auf dem neuen Host fehlt), Custom-Netzwerke (inkl. Subnetz und Labels) und Netzwerk-Aliasse (z. B. der Compose-Dienstname `db`) werden wiederhergestellt.
+- Belegte Host-Ports auf dem neuen System verhindern den Start — der Container wird dann angelegt, aber nicht gestartet, und die Meldung nennt den Grund.
+
 **Variante B — Backup-Ordner manuell übertragen:**
 
 1. Backup-Ordner (z. B. per `rclone copy`, SMB-Download oder S3-Sync) auf den Zielhost übertragen.

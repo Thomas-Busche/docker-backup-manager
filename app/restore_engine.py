@@ -88,6 +88,119 @@ def _remap_bind_mount(
     return src  # original source, useful to callers
 
 
+_BUILTIN_NETWORKS = ("bridge", "host", "none")
+
+
+def _recreate_network(client, net_name: str, net_attrs: dict) -> None:
+    """Recreate a custom network from its saved `docker network inspect`.
+
+    Keeps labels (Docker Compose refuses to reuse a network whose
+    com.docker.compose.* labels are missing), the internal/attachable flags,
+    driver options and the subnet. If the saved subnet collides with an
+    existing network on this host, the network is created without it -
+    Docker then picks a free range, which is what matters for name-based
+    container-to-container traffic."""
+    from docker.types import IPAMConfig, IPAMPool
+
+    kwargs = {"driver": net_attrs.get("Driver") or "bridge"}
+    if net_attrs.get("Options"):
+        kwargs["options"] = net_attrs["Options"]
+    if net_attrs.get("Labels"):
+        kwargs["labels"] = net_attrs["Labels"]
+    for src, dst in (("Internal", "internal"), ("Attachable", "attachable"), ("EnableIPv6", "enable_ipv6")):
+        if net_attrs.get(src):
+            kwargs[dst] = True
+
+    ipam = net_attrs.get("IPAM") or {}
+    pools = [
+        IPAMPool(subnet=c.get("Subnet"), gateway=c.get("Gateway") or None, iprange=c.get("IPRange") or None)
+        for c in (ipam.get("Config") or []) if c.get("Subnet")
+    ]
+    if pools:
+        try:
+            client.networks.create(net_name, ipam=IPAMConfig(driver=ipam.get("Driver") or "default",
+                                                             pool_configs=pools), **kwargs)
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Netzwerk '%s' mit ursprünglichem Subnetz nicht anlegbar (%s) - "
+                           "lege es mit automatischem Subnetz an", net_name, exc)
+    client.networks.create(net_name, **kwargs)
+
+
+def _attach_networks(client, container, container_json: dict, networks_json: dict,
+                     new_name: Optional[str], created_networks: Optional[set] = None) -> None:
+    """Connect the new container to its custom networks with the same DNS
+    aliases (and static IP, where one was set) it had before.
+
+    Docker Compose reaches services by their service name ("db", "redis"),
+    which is a network alias - not the container name. Without re-applying
+    the aliases a restored multi-container app can't find its own database.
+    The primary network was already attached through network_mode at create
+    time, but without aliases, so it is re-connected here.
+
+    A renamed restore (parallel/staging copy next to the original) only gets
+    aliases on networks this restore created itself: on a network shared with
+    the still-running original, a duplicate "db" alias would make Docker's DNS
+    round-robin between production and the copy."""
+    saved = (container_json.get("NetworkSettings") or {}).get("Networks") or {}
+    primary = (container_json.get("HostConfig") or {}).get("NetworkMode")
+    old_id = (container_json.get("Id") or "")[:12]
+    old_name = (container_json.get("Name") or "").lstrip("/")
+    renamed = bool(new_name) and new_name != old_name
+    for net_name in networks_json.keys():
+        endpoint = saved.get(net_name) or {}
+        aliases, ipv4 = [], None
+        if not renamed or net_name in (created_networks or set()):
+            aliases = [a for a in (endpoint.get("Aliases") or [])
+                       if a and a not in (old_id, old_name, new_name)]
+            ipv4 = ((endpoint.get("IPAMConfig") or {}).get("IPv4Address")) or None
+        try:
+            net = client.networks.get(net_name)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Netzwerk '%s' nicht gefunden: %s", net_name, exc)
+            continue
+        if net_name == primary:
+            if not aliases and not ipv4:
+                continue  # already attached via network_mode, nothing to add
+            try:
+                net.disconnect(container)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            net.connect(container, aliases=aliases or None, ipv4_address=ipv4)
+        except Exception as exc:  # noqa: BLE001
+            if ipv4:
+                logger.warning("Feste IP %s im Netzwerk '%s' nicht verfügbar (%s) - verbinde ohne",
+                               ipv4, net_name, exc)
+                try:
+                    net.connect(container, aliases=aliases or None)
+                except Exception as exc2:  # noqa: BLE001
+                    logger.warning("Verbinden mit Netzwerk '%s' fehlgeschlagen: %s", net_name, exc2)
+            elif "already exists" not in str(exc):
+                logger.warning("Verbinden mit Netzwerk '%s' fehlgeschlagen: %s", net_name, exc)
+
+
+def _create_volume(client, name: str, info: dict) -> None:
+    """Create a named volume with the driver/labels/options it had on the
+    source host; falls back to a plain local volume if that's not possible
+    here (e.g. a volume plugin that isn't installed on this machine)."""
+    kwargs = {}
+    if info.get("Driver") and info["Driver"] != "local":
+        kwargs["driver"] = info["Driver"]
+    if info.get("Labels"):
+        kwargs["labels"] = info["Labels"]
+    if info.get("Options"):
+        kwargs["driver_opts"] = info["Options"]
+    if kwargs:
+        try:
+            client.volumes.create(name=name, **kwargs)
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Volume '%s' nicht mit ursprünglichen Einstellungen anlegbar (%s) - "
+                           "lege einfaches lokales Volume an", name, exc)
+    client.volumes.create(name=name)
+
+
 def _build_create_kwargs(container_json: dict, new_name: Optional[str], image_ref: str,
                          volume_name_map: Optional[dict] = None) -> dict:
     config = container_json.get("Config", {})
@@ -165,6 +278,12 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
         storage_sync.download_full_backup_from_target(target_type, target_config_json, relative_key, backup_dir)
 
     if encryption.is_backup_encrypted(backup_dir):
+        if not encryption.is_enabled():
+            raise RuntimeError(
+                "Dieses Backup ist verschlüsselt, auf diesem System ist aber kein DBM_ENCRYPTION_KEY "
+                "gesetzt. Denselben Schlüssel wie auf dem Quellsystem als Umgebungsvariable setzen, "
+                "den Container neu starten und die Wiederherstellung erneut starten."
+            )
         on_progress(0, "Decrypting backup", 1)
         with encryption.decrypt_directory_to_temp(backup_dir) as tmp_dir:
             return _restore_from_plaintext_dir(Path(tmp_dir), new_name, start, on_progress,
@@ -191,6 +310,8 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
     meta = json.loads((backup_dir / "meta.json").read_text()) if (backup_dir / "meta.json").exists() else {}
     streamed_target_id = meta.get("streamed_target_id")
     bind_mounts_meta = meta.get("bind_mounts", [])
+    volume_info = meta.get("volume_info") or {}
+    created_networks: set = set()
 
     # Remove the existing container now that we have the plaintext container name.
     # (The overwrite check in restore_container can't do this for encrypted backups
@@ -349,10 +470,10 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
         on_progress(step, "Recreating networks", total_steps)
         existing_networks = {n.name for n in client.networks.list()}
         for net_name, net_attrs in networks_json.items():
-            if net_name in existing_networks:
+            if net_name in existing_networks or net_name in _BUILTIN_NETWORKS:
                 continue
-            driver = net_attrs.get("Driver", "bridge")
-            client.networks.create(net_name, driver=driver)
+            _recreate_network(client, net_name, net_attrs or {})
+            created_networks.add(net_name)
 
         for vol_name, vol_file, fmt in all_vol_entries:
             step += 1
@@ -363,7 +484,7 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             else:
                 existing_volumes = {v.name for v in client.volumes.list()}
                 if mapped not in existing_volumes:
-                    client.volumes.create(name=mapped)
+                    _create_volume(client, mapped, volume_info.get(vol_name) or {})
             if fmt == "tar":
                 restore_volume_from_tar(mapped, vol_file)
             else:
@@ -396,11 +517,7 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             ) from exc
         raise
 
-    for net_name in networks_json.keys():
-        try:
-            client.networks.get(net_name).connect(container)
-        except Exception:  # noqa: BLE001
-            pass
+    _attach_networks(client, container, container_json, networks_json, new_name, created_networks)
 
     if start:
         try:
@@ -413,6 +530,15 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             # remap block above (those already point to _BIND_REMAP_ROOT and cannot
             # have caused this failure).
             msg = str(exc)
+            if "port is already allocated" in msg or "address already in use" in msg:
+                # Typical for a parallel restore next to the running original,
+                # or a new host where another app already uses the port.
+                raise RuntimeError(
+                    f"Container '{create_kwargs.get('name', '')}' wurde wiederhergestellt, konnte aber nicht "
+                    "starten: ein veröffentlichter Port ist auf diesem System schon belegt. Den anderen "
+                    "Container stoppen oder den Port ändern und den Container dann starten. "
+                    f"(Docker: {msg})"
+                ) from exc
             if "creating mount source path" not in msg and "read-only file system" not in msg:
                 raise
             logger.info(
@@ -472,11 +598,7 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
 
             retry_kwargs = _build_create_kwargs(container_json, new_name, image_ref, volume_name_map)
             container = client.containers.create(**retry_kwargs)
-            for net_name in networks_json.keys():
-                try:
-                    client.networks.get(net_name).connect(container)
-                except Exception:  # noqa: BLE001
-                    pass
+            _attach_networks(client, container, container_json, networks_json, new_name, created_networks)
             container.start()
 
     return container
