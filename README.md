@@ -727,6 +727,8 @@ app/
 
 Docker Backup Manager wird von **Thomas Busche** unter dem Namen **BuscheHome** entwickelt.
 
-Der Name „BuscheHome“ und das BuscheHome-Logo (Dateien unter `app/static/img/`) sind Marken bzw. Kennzeichen des Autors. Sie sind **nicht** Teil der Open-Source-Lizenz des Quellcodes: Den Code darfst du im Rahmen der Lizenz nutzen, ändern und weitergeben, Name und Logo aber nicht für eigene Projekte, Forks oder Produkte verwenden oder so einsetzen, dass der Eindruck entsteht, sie stammten von BuscheHome oder seien von BuscheHome unterstützt. Wer einen veränderten Fork veröffentlicht, entfernt bitte Logo und Namen bzw. ersetzt sie durch eigene. Ein sachlicher Hinweis auf die Herkunft („basiert auf Docker Backup Manager von BuscheHome“) ist ausdrücklich erwünscht.
+Der Quellcode steht unter der **GNU General Public License v3.0** (siehe [LICENSE](LICENSE)). Du darfst ihn nutzen, ändern und weitergeben. Wer eine veränderte Version weitergibt, muss deren Quellcode ebenfalls unter der GPL-3.0 offenlegen und die Copyright-Hinweise erhalten.
+
+Der Name „BuscheHome“ und das BuscheHome-Logo (Dateien unter `app/static/img/`) sind Marken bzw. Kennzeichen des Autors. Sie sind **nicht** Teil dieser Lizenz: Den Code darfst du im Rahmen der GPL-3.0 nutzen, ändern und weitergeben, Name und Logo aber nicht für eigene Projekte, Forks oder Produkte verwenden oder so einsetzen, dass der Eindruck entsteht, sie stammten von BuscheHome oder seien von BuscheHome unterstützt. Wer einen veränderten Fork veröffentlicht, entfernt bitte Logo und Namen bzw. ersetzt sie durch eigene. Ein sachlicher Hinweis auf die Herkunft („basiert auf Docker Backup Manager von BuscheHome“) ist ausdrücklich erwünscht.
 
 Details stehen in der Datei [NOTICE](NOTICE).

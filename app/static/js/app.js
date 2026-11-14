@@ -1760,7 +1760,7 @@ async function settingsPage() {
         <div style="font-weight:600;">Docker Backup Manager <span class="muted" style="font-weight:400;">v${escHtml(overview.app_version || "")}</span></div>
         <div class="muted" style="font-size:.85rem; margin-top:2px;">Entwickelt von Thomas Busche · BuscheHome</div>
         <div style="font-size:.85rem; margin-top:6px;"><a href="https://github.com/Sirbuschi2003/docker-backup-manager" target="_blank" rel="noopener">Quellcode auf GitHub</a></div>
-        <div class="muted" style="font-size:.74rem; margin-top:8px;">„BuscheHome“ und das BuscheHome-Logo sind Marken des Autors und nicht Teil der Open-Source-Lizenz des Quellcodes.</div>
+        <div class="muted" style="font-size:.74rem; margin-top:8px;">Quellcode unter GPL-3.0. „BuscheHome“ und das BuscheHome-Logo sind Marken des Autors und nicht Teil dieser Lizenz.</div>
       </div>
     </div>
   </div>`);

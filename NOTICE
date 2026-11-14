@@ -1,5 +1,8 @@
 Docker Backup Manager
-Copyright (c) Thomas Busche (BuscheHome)
+Copyright (C) Thomas Busche (BuscheHome)
+
+Der Quellcode steht unter der GNU General Public License v3.0, siehe LICENSE.
+The source code is licensed under the GNU General Public License v3.0, see LICENSE.
 
 Marken- und Logo-Hinweis / Trademark notice
 -------------------------------------------
@@ -8,8 +11,8 @@ Marken- und Logo-Hinweis / Trademark notice
 app/static/img/: buschehome-logo-*.webp, favicon.ico, favicon-32.png,
 apple-touch-icon.png) sind Marken bzw. Kennzeichen von Thomas Busche.
 
-Sie sind NICHT von der Open-Source-Lizenz dieses Projekts umfasst. Die Lizenz
-gilt für den Quellcode; sie gewährt keine Rechte am Namen „BuscheHome“ oder am
+Sie sind NICHT von der Open-Source-Lizenz (GPL-3.0) dieses Projekts umfasst. Die
+Lizenz gilt für den Quellcode; sie gewährt keine Rechte am Namen „BuscheHome“ oder am
 Logo. Erlaubt ist ein sachlicher Hinweis auf die Herkunft, z. B. „basiert auf
 Docker Backup Manager von BuscheHome“. Wer eine veränderte Version (Fork)
 veröffentlicht oder vertreibt, muss Logo und Namen entfernen oder durch eigene
@@ -18,7 +21,7 @@ von BuscheHome oder werde von BuscheHome unterstützt.
 
 "BuscheHome" and the BuscheHome logo (including the files listed above) are
 trademarks of Thomas Busche. They are NOT licensed under this project's
-open-source license, which covers the source code only. Modified versions
+open-source license (GPL-3.0), which covers the source code only. Modified versions
 (forks) must remove or replace the name and logo and must not suggest
 endorsement by BuscheHome. A factual attribution such as "based on Docker
 Backup Manager by BuscheHome" is welcome.
