@@ -444,6 +444,8 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
     restic_repo_url: Optional[str] = None
     restic_env: dict = {}
     restic_smb_conf: Optional[str] = None
+    restic_lock = None
+    restic_locked = False
     restic_snapshot_ids: dict = {}
     restic_stats: dict = {}  # "added": bytes really added to the repo (after dedup)
     restic_password: str = ""
@@ -456,6 +458,11 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             restic_repo_url, restic_env, restic_smb_conf = restic_engine.repo_url_and_env(
                 target_type_r, target_config_r, name
             )
+            restic_lock = restic_engine.repo_lock(restic_repo_url)
+            if not restic_lock.acquire(blocking=False):
+                _log("Warte auf laufende Bereinigung dieses Restic-Repos …")
+                restic_lock.acquire()
+            restic_locked = True
             _log(f"Restic-Repo prüfen: {restic_repo_url}")
             restic_engine.init_repo_if_needed(restic_repo_url, restic_env, restic_password,
                                                on_log=on_log)
@@ -464,6 +471,9 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             logger.error("Restic-Init fehlgeschlagen, falle zurück auf Tar-Stream: %s", exc)
             _log(f"FEHLER Restic-Init: {exc} — falle zurück auf Tar-Stream")
             use_restic = False
+            if restic_locked:
+                restic_lock.release()
+                restic_locked = False
             if restic_smb_conf:
                 try:
                     restic_engine.rclone_backends.discard_conf(restic_smb_conf)
@@ -827,6 +837,8 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         if np_pause:
             # Auch nach einem Fehler: NetPulse wieder überwachen lassen (läuft der Container nicht, meldet es das)
             netpulse.resume(np_pause)
+        if restic_locked:
+            restic_lock.release()
         if restic_smb_conf:
             try:
                 restic_engine.rclone_backends.discard_conf(restic_smb_conf)

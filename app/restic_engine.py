@@ -309,6 +309,35 @@ def _add_current_password_as_key(repo_url: str, env: dict, password: str, _log) 
     )
 
 
+# One lock per repository inside this process: a backup (init + all its
+# snapshots) and the cleanup of deleted backups (forget / purging the whole
+# repo folder) must not interleave. Otherwise a cleanup still running from a
+# deletion can purge a repo that a new backup has just created, or hold the
+# exclusive prune lock so the new backup's restic exits right away.
+_repo_locks: dict[str, threading.RLock] = {}
+_repo_locks_guard = threading.Lock()
+
+# restic waits this long for another process' lock instead of failing at once
+RETRY_LOCK = "30m"
+
+
+def repo_lock(repo_url: str) -> threading.RLock:
+    with _repo_locks_guard:
+        return _repo_locks.setdefault(repo_url, threading.RLock())
+
+
+def snapshot_count(repo_url: str, env: dict, password: str) -> Optional[int]:
+    """Number of snapshots in the repo, None if it doesn't exist / can't be read."""
+    result = subprocess.run([RESTIC_BIN, "-r", repo_url, "snapshots", "--json", "--no-lock"],
+                            capture_output=True, env=_full_env(env, password), timeout=120)
+    if result.returncode != 0:
+        return None
+    try:
+        return len(json.loads(result.stdout or b"[]") or [])
+    except ValueError:
+        return None
+
+
 def init_repo_if_needed(repo_url: str, env: dict, password: str,
                          on_log: Optional[Callable] = None) -> None:
     """Initialisiert das Restic-Repo wenn es noch nicht existiert."""
@@ -386,7 +415,7 @@ def backup_volume_from_stream(
     proc = subprocess.Popen(
         [
             RESTIC_BIN, "-r", repo_url,
-            "backup", "--stdin", "--stdin-filename", "data.tar",
+            "backup", "--retry-lock", RETRY_LOCK, "--stdin", "--stdin-filename", "data.tar",
             "--tag", tag, "--json",
         ],
         stdin=subprocess.PIPE,
@@ -459,6 +488,26 @@ def backup_volume_from_stream(
         proc.stdin.close()
         if on_bytes and pending:
             on_bytes(pending)
+    except BrokenPipeError:
+        # restic quit before it had read all the data - report WHY instead of
+        # a bare "Broken pipe" (lock held by a cleanup, repo gone, NAS error …)
+        try:
+            proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        stdout_thread.join(timeout=5)
+        reason = proc.stderr.read().decode(errors="replace").strip()
+        for raw in stdout_lines:
+            try:
+                data = json.loads(raw)
+                if data.get("message_type") == "error":
+                    reason = (reason + " " + str(data.get("error", ""))).strip()
+            except ValueError:
+                pass
+        _log(f"restic FEHLER: {reason or 'ohne Meldung beendet'}")
+        raise RuntimeError(f"restic hat sich vorzeitig beendet (Exit {proc.returncode}): "
+                           f"{reason or 'keine Fehlermeldung'}") from None
     except Exception:
         try:
             proc.kill()
@@ -581,14 +630,15 @@ def _repo_is_empty(repo_url: str, env: dict, password: str) -> bool:
 
 def forget_snapshot(repo_url: str, env: dict, password: str, snapshot_id: str) -> None:
     """Löscht einen Restic-Snapshot und bereinigt nicht mehr referenzierte Daten."""
-    result = subprocess.run(
-        [RESTIC_BIN, "-r", repo_url, "forget", "--prune", snapshot_id],
-        capture_output=True,
-        env=_full_env(env, password),
-        # prune rewrites pack files - on a large repo over a WAN link this
-        # takes far longer than a few minutes.
-        timeout=3 * 3600,
-    )
+    with repo_lock(repo_url):
+        result = subprocess.run(
+            [RESTIC_BIN, "-r", repo_url, "forget", "--retry-lock", RETRY_LOCK, "--prune", snapshot_id],
+            capture_output=True,
+            env=_full_env(env, password),
+            # prune rewrites pack files - on a large repo over a WAN link this
+            # takes far longer than a few minutes.
+            timeout=3 * 3600,
+        )
     if result.returncode != 0:
         raise RuntimeError(
             f"restic forget fehlgeschlagen: {result.stderr.decode(errors='replace').strip()}"
@@ -664,7 +714,14 @@ def purge_restic_repo(container_name: str, stream_target: tuple) -> None:
     target_config = json.loads(target_config_json or "{}")
     repo_url, env, smb_conf_path = repo_url_and_env(target_type, target_config, container_name)
     try:
-        _delete_repo_folder(repo_url, env)
+        with repo_lock(repo_url):
+            # A backup may have written a new snapshot since the last record
+            # was deleted (the cleanup runs in the background) - keep the repo then
+            remaining = snapshot_count(repo_url, env, get_password())
+            if remaining:
+                logger.info("Restic-Repo für '%s' bleibt erhalten: %d neue Snapshot(s)", container_name, remaining)
+                return
+            _delete_repo_folder(repo_url, env)
         logger.info("Restic-Repo für '%s' vollständig gelöscht", container_name)
     finally:
         if smb_conf_path:
