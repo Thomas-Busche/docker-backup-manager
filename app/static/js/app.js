@@ -955,7 +955,7 @@ async function backupsPage() {
       const row = h(`<tr>
         <td style="width:36px; padding-right:0; vertical-align:middle;"><input type="checkbox" class="row-cb" data-id="${v.id}" style="width:auto; margin:0; cursor:pointer;"></td>
         <td>${fmtDate(v.created_at)}</td>
-        <td>${isLsc ? '<span class="badge neutral">Gruppe</span>' : levelBadge(v)}</td>
+        <td>${isLsc ? groupLevelBadge(v) : levelBadge(v)}</td>
         <td>${fmtBytes(displaySize)}</td>
         <td>${targetBadges(v.synced_target_ids, v.streamed_target_id)}</td>
         <td><span class="badge ${v.status === "ok" ? "ok" : "failed"}">${v.status}</span></td>
@@ -1010,6 +1010,17 @@ async function backupsPage() {
 }
 
 const LEVEL_LABELS = { full: "Voll", incremental: "Inkrementell", synthetic_full: "Synthetic Full", restic: "Inkrementell (Restic)" };
+
+// Group backup: what its member backups were (a run of an incremental schedule = "Gruppe · Inkrementell")
+function groupLevelBadge(v) {
+  const levels = v.member_levels || {};
+  const kinds = Object.keys(levels);
+  if (!kinds.length) return '<span class="badge neutral">Gruppe</span>';
+  const main = ["incremental", "restic", "synthetic_full", "full"].find((k) => levels[k]) || kinds[0];
+  const cls = { full: "neutral", incremental: "running", synthetic_full: "ok", restic: "running" }[main] || "neutral";
+  const title = kinds.map((k) => `${levels[k]}× ${LEVEL_LABELS[k] || k}`).join(", ");
+  return `<span class="badge ${cls}" title="Container-Sicherungen dieser Gruppe: ${escHtml(title)}">Gruppe · ${escHtml(LEVEL_LABELS[main] || main)}</span>`;
+}
 
 function levelBadge(v) {
   const level = v.backup_level || "full";

@@ -84,6 +84,7 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
             member_names, member_size = _landscape_member_info(r, records_by_path, records_latest_by_name)
             entry["member_names"] = member_names
             entry["member_size_bytes"] = member_size
+            entry["member_levels"] = _landscape_member_levels(r, records_by_path)
         grouped.setdefault(r.name, []).append(entry)
 
     targets = db.query(StorageTarget).all()
@@ -154,6 +155,17 @@ def _landscape_member_info(
             if mem_rec:
                 size += mem_rec.size_bytes or 0
     return names, size
+
+
+def _landscape_member_levels(record: BackupRecord, records_by_path: dict) -> dict:
+    """{level: count} of a group backup's member backups (full / incremental /
+    synthetic_full / restic), so the list shows whether a run was incremental."""
+    levels: dict[str, int] = {}
+    for d in _read_member_jsons(Path(record.path)):
+        mem_rec = records_by_path.get(d.get("backup_path", ""))
+        level = (mem_rec.backup_level if mem_rec is not None else None) or d.get("backup_level") or "full"
+        levels[level] = levels.get(level, 0) + 1
+    return levels
 
 
 import logging as _logging

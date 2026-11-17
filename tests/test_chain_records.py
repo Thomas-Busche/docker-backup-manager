@@ -210,3 +210,30 @@ def test_verify_a_group_backup_checks_every_member(monkeypatch):
     assert job.status == "failed"
     logs = " ".join(entry["msg"] for entry in job_tracker.get_logs(job_id))
     assert f"bad-{tag}: FEHLER" in logs and f"web-{tag}: in Ordnung" in logs and "2 Container" in logs
+
+
+def test_group_backup_listing_shows_member_levels():
+    from app.config import BACKUPS_DIR
+    from app.database import SessionLocal, init_db
+    from app.main import app
+    from app.models import BackupRecord
+    from app.reset_password import reset_password
+
+    init_db()
+    reset_password("chain-list-user", "supersecret1")
+    tag = uuid.uuid4().hex[:6]
+    with SessionLocal() as db:
+        a = _rec(db, f"a-{tag}", "20260102T000000Z", "incremental", ["20260101T000000Z"])
+        b = _rec(db, f"b-{tag}", "20260102T000000Z", "full")
+        lsc_dir = BACKUPS_DIR / f"grp-{tag}" / "20260102T000000Z"
+        lsc_dir.mkdir(parents=True)
+        for r in (a, b):
+            (lsc_dir / f"{r.name}.json").write_text(json.dumps(
+                {"container_name": r.name, "backup_path": r.path, "backup_level": r.backup_level}))
+        db.add(BackupRecord(backup_type="landscape", name=f"grp-{tag}", path=str(lsc_dir), status="ok",
+                            containers_json=json.dumps([a.name, b.name])))
+        db.commit()
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "chain-list-user", "password": "supersecret1"})
+        entry = client.get("/api/backups").json()["groups"][f"grp-{tag}"][0]
+    assert entry["member_levels"] == {"incremental": 1, "full": 1}
