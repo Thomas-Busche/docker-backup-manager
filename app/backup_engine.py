@@ -103,6 +103,8 @@ class BackupResult:
     chain_id: Optional[str] = None
     depends_on: list[str] = field(default_factory=list)
     data_as_of: Optional[str] = None
+    # Restic: bytes this run really added to the repository (size_bytes = protected data)
+    added_bytes: Optional[int] = None
     # A synthetic full created right after this incremental (own directory,
     # needs its own BackupRecord) and the keys of the chain it merged.
     synthetic: Optional["BackupResult"] = None
@@ -443,6 +445,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
     restic_env: dict = {}
     restic_smb_conf: Optional[str] = None
     restic_snapshot_ids: dict = {}
+    restic_stats: dict = {}  # "added": bytes really added to the repo (after dedup)
     restic_password: str = ""
 
     if use_restic:
@@ -569,7 +572,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             sid, _n = restic_engine.backup_volume_from_stream(
                 _image_chunks_r(), restic_repo_url, restic_env, restic_password,
                 f"{sanitize_name(name)}/__image__", on_bytes=on_bytes, should_cancel=should_cancel,
-                on_upload_bytes=on_upload_bytes, on_log=on_log,
+                on_upload_bytes=on_upload_bytes, on_log=on_log, stats=restic_stats,
             )
             restic_snapshot_ids["__image__"] = sid
         elif stream_target:
@@ -648,7 +651,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                     iter_volume_tar_chunks(vol_name, should_cancel=should_cancel, compress=False),
                     restic_repo_url, restic_env, restic_password, tag,
                     on_bytes=on_bytes, should_cancel=should_cancel,
-                    on_upload_bytes=on_upload_bytes, on_log=on_log,
+                    on_upload_bytes=on_upload_bytes, on_log=on_log, stats=restic_stats,
                 )
                 restic_snapshot_ids[vol_name] = snapshot_id
                 restic_data_bytes += vol_bytes
@@ -704,7 +707,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                         iter_volume_tar_chunks(source, should_cancel=should_cancel, compress=False),
                         restic_repo_url, restic_env, restic_password, tag,
                         on_bytes=on_bytes, should_cancel=should_cancel,
-                        on_upload_bytes=on_upload_bytes, on_log=on_log,
+                        on_upload_bytes=on_upload_bytes, on_log=on_log, stats=restic_stats,
                     )
                     restic_snapshot_ids[f"bind_{bind_key}"] = snapshot_id
                     restic_data_bytes += bind_bytes
@@ -756,6 +759,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             meta["restic_repo_url"] = restic_repo_url
             meta["restic_snapshot_ids"] = restic_snapshot_ids
             meta["restic_data_bytes"] = restic_data_bytes
+            meta["restic_added_bytes"] = restic_stats.get("added", 0)
             meta["restic_password"] = restic_password
             if incremental:
                 meta["backup_level"] = "restic"
@@ -783,7 +787,10 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
 
         size = restic_data_bytes if use_restic else dir_size_bytes(backup_dir)
         _log(f"Backup abgeschlossen ({fmtbytes(size)})")
+        if use_restic:
+            _log(f"Neu im Restic-Repository (nach Deduplizierung): {fmtbytes(restic_stats.get('added', 0))}")
         result = BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name],
+                              added_bytes=restic_stats.get("added") if use_restic else None,
                               streamed_target_id=stream_target[2] if stream_target else None,
                               level=meta.get("backup_level"),
                               chain_id=(chain_info or {}).get("id"),

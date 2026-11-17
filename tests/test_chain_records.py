@@ -237,3 +237,4 @@ def test_group_backup_listing_shows_member_levels():
         client.post("/api/auth/login", json={"username": "chain-list-user", "password": "supersecret1"})
         entry = client.get("/api/backups").json()["groups"][f"grp-{tag}"][0]
     assert entry["member_levels"] == {"incremental": 1, "full": 1}
+    assert entry["member_added_bytes"] is None

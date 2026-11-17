@@ -36,6 +36,7 @@ def chain_columns(result) -> dict:
         "chain_id": getattr(result, "chain_id", None),
         "depends_json": json.dumps([str(root / k) for k in (getattr(result, "depends_on", None) or [])]),
         "data_as_of": _parse_iso(getattr(result, "data_as_of", None)),
+        "added_bytes": getattr(result, "added_bytes", None),
     }
 
 

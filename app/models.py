@@ -36,6 +36,7 @@ class BackupRecord(Base):
     backup_level = Column(String(16), nullable=True)
     chain_id = Column(String(64), nullable=True)
     depends_json = Column(Text, nullable=True)  # JSON list of backup paths this version needs for a restore
+    added_bytes = Column(Integer, nullable=True)  # restic: bytes this run really added to the repo (after dedup)
     data_as_of = Column(DateTime, nullable=True)  # point in time the data represents (synthetic full = its source incremental)
 
 
