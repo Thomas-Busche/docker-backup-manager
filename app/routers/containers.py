@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import backup_engine, event_log, job_tracker, storage_sync
+from app import backup_engine, backup_records, event_log, job_tracker, storage_sync
 from app.auth import get_current_user
 from app.config import BACKUPS_DIR
 from app.database import SessionLocal, get_db
@@ -43,7 +43,8 @@ def list_containers(user: User = Depends(get_current_user)):
 
 def _run_container_backup_job(job_id: str, container_name: str, storage_target_ids: Optional[list[int]],
                                stream_volumes_target_id: Optional[int] = None,
-                               stop_container: bool = False):
+                               stop_container: bool = False, backup_mode: str = "full",
+                               synthetic_full_every: int = 0):
     db = SessionLocal()
     try:
         event_log.log_event("backup", f'Backup für Container "{container_name}" gestartet')
@@ -66,29 +67,14 @@ def _run_container_backup_job(job_id: str, container_name: str, storage_target_i
             should_cancel=lambda: job_tracker.is_cancel_requested(job_id),
             stop_container=stop_container, on_bytes=on_bytes, on_upload_bytes=on_upload_bytes,
             on_log=on_log,
+            **({"backup_mode": backup_mode, "synthetic_full_every": synthetic_full_every}
+               if backup_mode != "full" else {}),
         )
-        record = BackupRecord(
-            backup_type="container",
-            name=result.name,
-            path=str(result.path),
-            status="ok" if result.ok else "failed",
-            error=result.error,
-            size_bytes=result.size_bytes,
-            containers_json=json.dumps(result.containers),
-            streamed_target_id=result.streamed_target_id,
-        )
-        db.add(record)
-        db.commit()
-        db.refresh(record)
+        def upload_progress(label, idx, total):
+            job_tracker.update_progress(job_id, 1, label, 1)
 
-        if result.ok:
-            def upload_progress(label, idx, total):
-                job_tracker.update_progress(job_id, 1, label, 1)
-
-            sync_results, _ = storage_sync.sync_backup_with_members(
-                result.path, [], storage_target_ids, stream_target=stream_target, on_progress=upload_progress)
-            record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
-            db.commit()
+        record = backup_records.persist_result(db, result, "container", storage_target_ids,
+                                               stream_target=stream_target, on_progress=upload_progress)
 
         if result.cancelled:
             job_tracker.cancel_job(job_id)
@@ -111,6 +97,8 @@ class ContainerBackupPayload(BaseModel):
     storage_target_ids: Optional[list[int]] = None
     stream_volumes_target_id: Optional[int] = None
     stop_container: bool = False
+    backup_mode: str = "full"  # "full" | "incremental" (continues the container's chain, or starts one)
+    synthetic_full_every: int = 7
 
 
 @router.post("/{name}/backup")
@@ -119,8 +107,15 @@ def backup_container_now(name: str, payload: ContainerBackupPayload = ContainerB
     job = job_tracker.create_job("backup", name, total_steps=1)
     thread = threading.Thread(
         target=_run_container_backup_job,
-        args=(job.id, name, payload.storage_target_ids, payload.stream_volumes_target_id, payload.stop_container),
+        args=(job.id, name, payload.storage_target_ids, payload.stream_volumes_target_id, payload.stop_container,
+              _mode(payload.backup_mode), max(0, payload.synthetic_full_every)),
         daemon=True,
     )
     thread.start()
     return {"job_id": job.id}
+
+
+def _mode(value: str) -> str:
+    if value not in ("full", "incremental"):
+        raise HTTPException(400, "backup_mode muss 'full' oder 'incremental' sein")
+    return value

@@ -63,6 +63,12 @@ def _add_missing_columns():
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN stop_containers BOOLEAN NOT NULL DEFAULT 0"))
             if "exclude_names" not in existing:
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN exclude_names TEXT"))
+            if "backup_mode" not in existing:
+                conn.execute(text("ALTER TABLE schedules ADD COLUMN backup_mode VARCHAR(16) NOT NULL DEFAULT 'full'"))
+            if "synthetic_full_every" not in existing:
+                conn.execute(text("ALTER TABLE schedules ADD COLUMN synthetic_full_every INTEGER NOT NULL DEFAULT 7"))
+            if "keep_merged_incrementals" not in existing:
+                conn.execute(text("ALTER TABLE schedules ADD COLUMN keep_merged_incrementals BOOLEAN NOT NULL DEFAULT 1"))
 
         if "backup_records" in tables:
             existing = {col["name"] for col in inspector.get_columns("backup_records")}
@@ -70,6 +76,10 @@ def _add_missing_columns():
                 conn.execute(text("ALTER TABLE backup_records ADD COLUMN synced_target_ids TEXT"))
             if "streamed_target_id" not in existing:
                 conn.execute(text("ALTER TABLE backup_records ADD COLUMN streamed_target_id INTEGER"))
+            for col, ddl in (("backup_level", "VARCHAR(16)"), ("chain_id", "VARCHAR(64)"),
+                             ("depends_json", "TEXT"), ("data_as_of", "DATETIME")):
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE backup_records ADD COLUMN {col} {ddl}"))
 
 
 def _pragma(conn, name: str):

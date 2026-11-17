@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterator, Optional
 
-from app import encryption, netpulse, restic_engine, storage_sync
+from app import chain, encryption, netpulse, restic_engine, storage_sync
 from app.config import BACKUPS_DIR, DOCKER_HELPER_IMAGE, GZIP_LEVEL, container_path_to_host
 from app.docker_client import get_client
 
@@ -97,6 +97,20 @@ class BackupResult:
     # tracker shows a neutral "abgebrochen" status instead of a red "failed"
     # one for these.
     cancelled: bool = False
+    # Incremental chains (see app/chain.py): level of this backup, its chain
+    # and the backups (relative keys "<name>/<ts>") it needs for a restore.
+    level: Optional[str] = None
+    chain_id: Optional[str] = None
+    depends_on: list[str] = field(default_factory=list)
+    data_as_of: Optional[str] = None
+    # A synthetic full created right after this incremental (own directory,
+    # needs its own BackupRecord) and the keys of the chain it merged.
+    synthetic: Optional["BackupResult"] = None
+    merged_keys: list[str] = field(default_factory=list)
+    # Incremental chains are kept in the local repository and uploaded like
+    # any backup; if a plain (non-restic) streaming target was chosen, the
+    # caller adds it to the upload targets instead.
+    fallback_sync_target_id: Optional[int] = None
 
 
 def _timestamp() -> str:
@@ -321,35 +335,37 @@ def _ensure_helper_image(client) -> None:
         client.images.pull(DOCKER_HELPER_IMAGE)
 
 
-def restore_volume_from_file(volume_name: str, src_tar_gz: Path) -> None:
+_CLEAR_DATA = "find /data -mindepth 1 -maxdepth 1 -exec rm -rf {} + && "
+
+
+def _extract_into(volume_or_path: str, archive: Path, tar_flags: str, clear: bool = False) -> None:
+    """Extracts a backup archive into a named volume (or host path) through a
+    helper container. clear=True empties it first, so the result is exactly
+    the backed-up state (files created after the backup don't survive) -
+    what a point-in-time restore over existing data needs."""
     client = get_client()
     _ensure_helper_image(client)
-    src_dir = src_tar_gz.parent.resolve()
+    src_dir = archive.parent.resolve()
+    extract = f"tar {tar_flags} /backup/{archive.name} -C /data"
+    command = ["sh", "-c", _CLEAR_DATA + extract] if clear else extract.split(" ")
     client.containers.run(
         DOCKER_HELPER_IMAGE,
-        command=["tar", "xzf", f"/backup/{src_tar_gz.name}", "-C", "/data"],
+        command=command,
         volumes={
-            volume_name: {"bind": "/data", "mode": "rw"},
+            volume_or_path: {"bind": "/data", "mode": "rw"},
             container_path_to_host(src_dir): {"bind": "/backup", "mode": "ro"},
         },
         remove=True,
     )
 
 
-def restore_volume_from_tar(volume_name: str, src_tar: Path) -> None:
+def restore_volume_from_file(volume_name: str, src_tar_gz: Path, clear: bool = False) -> None:
+    _extract_into(volume_name, src_tar_gz, "xzf", clear)
+
+
+def restore_volume_from_tar(volume_name: str, src_tar: Path, clear: bool = False) -> None:
     """Wie restore_volume_from_file, aber für unkomprimierte .tar (restic dump)."""
-    client = get_client()
-    _ensure_helper_image(client)
-    src_dir = src_tar.parent.resolve()
-    client.containers.run(
-        DOCKER_HELPER_IMAGE,
-        command=["tar", "xf", f"/backup/{src_tar.name}", "-C", "/data"],
-        volumes={
-            volume_name: {"bind": "/data", "mode": "rw"},
-            container_path_to_host(src_dir): {"bind": "/backup", "mode": "ro"},
-        },
-        remove=True,
-    )
+    _extract_into(volume_name, src_tar, "xf", clear)
 
 
 def backup_container(container_id_or_name: str, *args, **kwargs) -> BackupResult:
@@ -378,16 +394,29 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                       stop_container: bool = False,
                       on_bytes: BytesCallback = None,
                       on_upload_bytes: BytesCallback = None,
-                      on_log: LogCallback = None) -> BackupResult:
+                      on_log: LogCallback = None,
+                      backup_mode: str = "full",
+                      synthetic_full_every: int = 0) -> BackupResult:
     def _log(msg: str) -> None:
         if on_log:
             on_log(msg)
+
+    incremental = backup_mode == "incremental"
+    fallback_sync_target_id: Optional[int] = None
+    if incremental and stream_target and not restic_engine.is_available():
+        # Without restic a streaming target can't hold a chain (no way to
+        # combine data there) - keep the chain in the local repository and
+        # upload every member to that target instead.
+        fallback_sync_target_id = stream_target[2]
+        stream_target = None
+        _log("Inkrementell ohne restic: Kette im lokalen Backup-Speicher, Upload danach aufs Ziel")
 
     client = get_client()
     container = client.containers.get(container_id_or_name)
     attrs = container.attrs
     name = container.name
-    ts = _timestamp()
+    # Unique per container: a synthetic full may already hold this second
+    ts = chain._timestamp_after(dest_root / sanitize_name(name))
     backup_dir = dest_root / sanitize_name(name) / ts
 
     volume_mounts = [m for m in attrs.get("Mounts", []) if m.get("Type") == "volume"]
@@ -438,6 +467,44 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 except Exception:
                     pass
                 restic_smb_conf = None
+            if incremental:
+                fallback_sync_target_id = stream_target[2]
+                stream_target = None
+                _log("Inkrementell: Kette im lokalen Backup-Speicher, Upload danach aufs Ziel")
+
+    # Incremental chain in the local repository (restic targets are
+    # incremental on their own: deduplicated, every snapshot a full state).
+    chain_mode = incremental and not use_restic
+    self_key = f"{sanitize_name(name)}/{ts}"
+    level: Optional[str] = None
+    chain_info: Optional[dict] = None
+    parent_dir: Optional[Path] = None
+    parent_meta: dict = {}
+    manifests: list[dict] = []
+    current_image_id = None
+    if chain_mode:
+        try:
+            current_image_id = container.image.id
+        except Exception:  # noqa: BLE001
+            current_image_id = attrs.get("Image")
+        parent = chain.find_parent(dest_root / sanitize_name(name))
+        if parent:
+            parent_dir, parent_meta = parent
+            level = chain.LEVEL_INCREMENTAL
+            chain_info = chain.incremental_chain_info(chain.backup_key(parent_dir), parent_meta, self_key)
+            _log(f"Inkrementelles Backup auf Basis von {chain.backup_key(parent_dir)} "
+                 f"(Kette {chain_info['id'][:8]}, Nr. {chain_info['seq']})")
+        else:
+            level = chain.LEVEL_FULL
+            chain_info = chain.new_chain_info(self_key)
+            _log("Initiales Vollbackup (neue Kette)")
+
+    def _parent_manifest(rel: str) -> Optional[dict]:
+        if parent_dir is None:
+            return None
+        if not chain.file_exists(parent_dir, rel):
+            return {"entries": []}  # mount is new since the parent -> everything counts as changed
+        return chain.read_manifest(parent_dir, rel)
 
     def _cleanup_remote_partial() -> None:
         """Remove any data already uploaded to the remote target for this failed run."""
@@ -483,7 +550,29 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
         _log(f"Speichere Image: {image_tag or 'unbekannt'}")
         image_tar = backup_dir / "image.tar"
         image_size = 0
-        if stream_target:
+        reuse_image = (chain_mode and parent_dir is not None and current_image_id
+                       and parent_meta.get("image_id") == current_image_id
+                       and (parent_meta.get("chain") or {}).get("image_src"))
+        if reuse_image:
+            chain_info["image_src"] = parent_meta["chain"]["image_src"]
+            _log(f"Image unverändert - verweise auf {chain_info['image_src']}")
+        elif use_restic and incremental:
+            # Image into the restic repo too: deduplicated, only changed layers use space
+            on_progress(step, f"Restic: Sicherung Image {image_tag}", total_steps)
+
+            def _image_chunks_r():
+                nonlocal image_size
+                for chunk in container.image.save(named=True):
+                    image_size += len(chunk)
+                    yield chunk
+
+            sid, _n = restic_engine.backup_volume_from_stream(
+                _image_chunks_r(), restic_repo_url, restic_env, restic_password,
+                f"{sanitize_name(name)}/__image__", on_bytes=on_bytes, should_cancel=should_cancel,
+                on_upload_bytes=on_upload_bytes, on_log=on_log,
+            )
+            restic_snapshot_ids["__image__"] = sid
+        elif stream_target:
             # Stream image directly to storage target — no local copy needed.
             # Applies to both restic and plain-stream modes: restic only handles
             # volumes/binds, the image is always streamed separately.
@@ -538,7 +627,20 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 volume_info[vol_name] = info
             vol_filename = f"{sanitize_name(vol_name)}.tar.gz"
 
-            if use_restic:
+            if chain_mode:
+                on_progress(step, f"{'Inkrementell' if parent_dir else 'Voll'}: Volume {vol_name}", total_steps)
+                manifest = chain.capture(
+                    iter_volume_tar_chunks(vol_name, should_cancel=should_cancel, on_bytes=on_bytes,
+                                           compress=False),
+                    volumes_dir / vol_filename, self_key,
+                    _parent_manifest(f"volumes/{sanitize_name(vol_name)}{chain.MANIFEST_SUFFIX}"),
+                    GZIP_LEVEL, should_cancel)
+                chain.write_manifest(volumes_dir / f"{sanitize_name(vol_name)}{chain.MANIFEST_SUFFIX}", manifest)
+                manifests.append(manifest)
+                st = manifest["stats"]
+                _log(f"Volume '{vol_name}': {st['changed_files']} geändert/neu ({fmtbytes(st['changed_bytes'])}), "
+                     f"{st['unchanged_files']} unverändert, {st['deleted']} gelöscht")
+            elif use_restic:
                 on_progress(step, f"Restic: Sicherung Volume {vol_name}", total_steps)
                 tag = f"{sanitize_name(name)}/{sanitize_name(vol_name)}"
                 _log(f"Starte restic backup für Volume '{vol_name}' (tag={tag})")
@@ -578,7 +680,21 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 "is_file": _bind_source_is_file(client, source),
             })
 
-            if use_restic:
+            if chain_mode:
+                on_progress(step, f"{'Inkrementell' if parent_dir else 'Voll'}: Bind-Mount {destination}", total_steps)
+                manifest = chain.capture(
+                    iter_volume_tar_chunks(source, should_cancel=should_cancel, on_bytes=on_bytes,
+                                           compress=False),
+                    binds_dir / bind_filename, self_key,
+                    _parent_manifest(f"binds/{sanitize_name(destination)}{chain.MANIFEST_SUFFIX}"),
+                    GZIP_LEVEL, should_cancel)
+                chain.write_manifest(binds_dir / f"{sanitize_name(destination)}{chain.MANIFEST_SUFFIX}", manifest)
+                manifests.append(manifest)
+                st = manifest["stats"]
+                _log(f"Bind-Mount '{destination}': {st['changed_files']} geändert/neu "
+                     f"({fmtbytes(st['changed_bytes'])}), {st['unchanged_files']} unverändert, "
+                     f"{st['deleted']} gelöscht")
+            elif use_restic:
                 on_progress(step, f"Restic: Sicherung Bind-Mount {destination}", total_steps)
                 bind_key = sanitize_name(destination)
                 tag = f"{sanitize_name(name)}/bind_{bind_key}"
@@ -641,6 +757,19 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             meta["restic_snapshot_ids"] = restic_snapshot_ids
             meta["restic_data_bytes"] = restic_data_bytes
             meta["restic_password"] = restic_password
+            if incremental:
+                meta["backup_level"] = "restic"
+        if chain_mode:
+            chain.finalize_depends(chain_info, manifests, self_key)
+            meta["backup_level"] = level
+            meta["chain"] = chain_info
+            meta["image_id"] = current_image_id
+            meta["data_as_of"] = meta["created_at"]
+            meta["chain_stats"] = {
+                k: sum(m["stats"].get(k, 0) for m in manifests)
+                for k in ("files", "changed_files", "changed_bytes", "unchanged_files", "total_bytes", "deleted")
+            }
+            meta["checksums"] = chain.compute_checksums(backup_dir)
         (backup_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
         if encrypt:
@@ -654,14 +783,24 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
 
         size = restic_data_bytes if use_restic else dir_size_bytes(backup_dir)
         _log(f"Backup abgeschlossen ({fmtbytes(size)})")
-        return BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name],
-                             streamed_target_id=stream_target[2] if stream_target else None)
+        result = BackupResult(ok=True, name=name, path=backup_dir, size_bytes=size, containers=[name],
+                              streamed_target_id=stream_target[2] if stream_target else None,
+                              level=meta.get("backup_level"),
+                              chain_id=(chain_info or {}).get("id"),
+                              depends_on=list((chain_info or {}).get("depends_on") or []),
+                              data_as_of=meta["created_at"],
+                              fallback_sync_target_id=fallback_sync_target_id)
+        if (chain_mode and level == chain.LEVEL_INCREMENTAL and synthetic_full_every
+                and chain_info["seq"] >= synthetic_full_every):
+            result.synthetic, result.merged_keys = _make_synthetic_full(backup_dir, name, _log, should_cancel)
+        return result
     except BackupCancelled as exc:
         _log(f"Backup abgebrochen: {exc}")
         shutil.rmtree(backup_dir, ignore_errors=True)
         _cleanup_remote_partial()
         return BackupResult(ok=False, name=name, path=backup_dir, error=str(exc), cancelled=True)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("Backup von %s fehlgeschlagen", name)
         # Don't leave a half-written backup directory (partial image.tar, etc.) behind.
         shutil.rmtree(backup_dir, ignore_errors=True)
         _cleanup_remote_partial()
@@ -683,6 +822,29 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 restic_engine.rclone_backends.discard_conf(restic_smb_conf)
             except Exception:
                 pass
+
+
+def _make_synthetic_full(latest_dir: Path, name: str, _log, should_cancel: ShouldCancel):
+    """Runs the synthetic full after an incremental. A failure here never
+    fails the (already complete) incremental - the chain just keeps growing
+    and the next run tries again."""
+    try:
+        _log(f"Kette hat das Limit erreicht - erstelle Synthetic Full im Backup-Speicher")
+        merged = chain.chain_members(latest_dir)
+        new_dir = chain.create_synthetic_full(latest_dir, on_log=_log, should_cancel=should_cancel,
+                                              gzip_level=GZIP_LEVEL)
+        new_meta = chain.read_meta(new_dir)
+        _log(f"Synthetic Full erstellt: {chain.backup_key(new_dir)}")
+        return BackupResult(ok=True, name=name, path=new_dir, size_bytes=dir_size_bytes(new_dir),
+                            containers=[name], level=chain.LEVEL_SYNTHETIC,
+                            chain_id=new_meta["chain"]["id"], depends_on=[],
+                            data_as_of=new_meta.get("data_as_of")), merged
+    except BackupCancelled:
+        _log("Synthetic Full abgebrochen - Kette bleibt unverändert")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Synthetic Full für %s fehlgeschlagen", name)
+        _log(f"FEHLER Synthetic Full: {exc} - Kette bleibt unverändert, nächster Lauf versucht es erneut")
+    return None, []
 
 
 def list_landscape_containers(project_filter: Optional[str] = None,
@@ -717,7 +879,9 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
                       stop_containers: bool = False,
                       on_bytes: BytesCallback = None,
                       on_upload_bytes: BytesCallback = None,
-                      on_log: LogCallback = None) -> BackupResult:
+                      on_log: LogCallback = None,
+                      backup_mode: str = "full",
+                      synthetic_full_every: int = 0) -> BackupResult:
     # list_landscape_containers may raise (e.g. Docker socket timeout) — landscape_dir
     # must NOT be created before this call so there is nothing to clean up on failure.
     containers = list_landscape_containers(project_filter, name_contains, exclude_names)
@@ -726,6 +890,8 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
     landscape_dir = dest_root / "_landscapes" / sanitize_name(landscape_name) / ts
     landscape_dir.mkdir(parents=True, exist_ok=True)
 
+    chain_kwargs = ({"backup_mode": backup_mode, "synthetic_full_every": synthetic_full_every}
+                    if backup_mode != "full" else {})
     member_names = []
     member_results = []
     errors = []
@@ -742,7 +908,7 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
             on_progress(idx, f"Backing up {c.name} ({idx}/{total})", total)
             result = backup_container(c.name, dest_root, stream_target=stream_target, should_cancel=should_cancel,
                                        stop_container=stop_containers, on_bytes=on_bytes,
-                                       on_upload_bytes=on_upload_bytes, on_log=on_log)
+                                       on_upload_bytes=on_upload_bytes, on_log=on_log, **chain_kwargs)
             member_names.append(result.name)
             member_results.append(result)
             if result.cancelled:
@@ -757,10 +923,13 @@ def backup_landscape(dest_root: Path = BACKUPS_DIR, project_filter: Optional[str
                 if result.path and result.path.exists():
                     shutil.rmtree(result.path, ignore_errors=True)
             else:
-                (landscape_dir / (result.name + ".json")).write_text(json.dumps({
-                    "container_name": result.name,
-                    "backup_path": str(result.path),
-                }))
+                member_link = {"container_name": result.name, "backup_path": str(result.path)}
+                if result.level:
+                    member_link["backup_level"] = result.level
+                if result.synthetic is not None:
+                    # Created in the same run - pruned together with this group backup
+                    member_link["synthetic_path"] = str(result.synthetic.path)
+                (landscape_dir / (result.name + ".json")).write_text(json.dumps(member_link))
 
         meta = {
             "format_version": APP_BACKUP_FORMAT_VERSION,

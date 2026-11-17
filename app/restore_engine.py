@@ -20,7 +20,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
-from app import encryption, restic_engine, storage_sync
+from app import chain, encryption, restic_engine, storage_sync
 
 logger = logging.getLogger("dbm.restore")
 from app.backup_engine import ProgressCallback, StreamTarget, _noop_progress, restore_volume_from_file, restore_volume_from_tar, sanitize_name
@@ -262,7 +262,9 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
                        stream_target: Optional[StreamTarget] = None,
                        rename_volumes: bool = True,
                        volume_base_dir: Optional[str] = None,
-                       overwrite: bool = False):
+                       overwrite: bool = False,
+                       fetch_missing: chain.FetchMissing = None,
+                       on_log: chain.LogCallback = None):
     backup_dir = Path(backup_dir)
     relative_key = storage_sync._relative_key(backup_dir)
 
@@ -277,13 +279,19 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
         target_type, target_config_json, _target_id = stream_target
         storage_sync.download_full_backup_from_target(target_type, target_config_json, relative_key, backup_dir)
 
+    _require_key_if_encrypted(backup_dir)
+    if chain.is_chain_meta(chain.read_meta(backup_dir)):
+        # Incremental chain (any point in time): synthesize the full state from
+        # the chain - every file hash is checked on the way - and restore that
+        # like an ordinary full backup.
+        on_progress(0, "Stelle Zeitpunkt aus der Sicherungskette zusammen", 1)
+        fetch = fetch_missing or fetcher_for_targets([stream_target] if stream_target else [])
+        with tempfile.TemporaryDirectory(dir=_staging_root(), prefix="dbm-chain-restore-") as tmp:
+            chain.materialize(backup_dir, Path(tmp), fetch_missing=fetch, on_log=on_log)
+            return _restore_from_plaintext_dir(Path(tmp), new_name, start, on_progress, None,
+                                                relative_key, rename_volumes, volume_base_dir, overwrite)
+
     if encryption.is_backup_encrypted(backup_dir):
-        if not encryption.is_enabled():
-            raise RuntimeError(
-                "Dieses Backup ist verschlüsselt, auf diesem System ist aber kein DBM_ENCRYPTION_KEY "
-                "gesetzt. Denselben Schlüssel wie auf dem Quellsystem als Umgebungsvariable setzen, "
-                "den Container neu starten und die Wiederherstellung erneut starten."
-            )
         on_progress(0, "Decrypting backup", 1)
         with encryption.decrypt_directory_to_temp(backup_dir) as tmp_dir:
             return _restore_from_plaintext_dir(Path(tmp_dir), new_name, start, on_progress,
@@ -291,6 +299,51 @@ def restore_container(backup_dir: Path, new_name: Optional[str] = None, start: b
                                                 volume_base_dir, overwrite)
     return _restore_from_plaintext_dir(backup_dir, new_name, start, on_progress, stream_target,
                                         relative_key, rename_volumes, volume_base_dir, overwrite)
+
+
+def _require_key_if_encrypted(backup_dir: Path) -> None:
+    if encryption.is_backup_encrypted(backup_dir) and not encryption.is_enabled():
+        raise RuntimeError(
+            "Dieses Backup ist verschlüsselt, auf diesem System ist aber kein DBM_ENCRYPTION_KEY "
+            "gesetzt. Denselben Schlüssel wie auf dem Quellsystem als Umgebungsvariable setzen, "
+            "den Container neu starten und die Wiederherstellung erneut starten."
+        )
+
+
+def _staging_root() -> Path:
+    root = BACKUPS_DIR / ".tmp"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def fetcher_for_targets(targets: list) -> chain.FetchMissing:
+    """fetch_missing callback for chain restores: downloads a missing chain
+    member ("<name>/<ts>") from the first storage target that has it. Works
+    for every target type that supports a full-directory download."""
+    targets = [t for t in (targets or []) if t]
+    if not targets:
+        return None
+
+    def fetch(key: str, dest: Path) -> None:
+        errors = []
+        for t in targets:
+            target_type, config_json = t[0], t[1]
+            try:
+                storage_sync.download_full_backup_from_target(target_type, config_json, key, dest)
+                if chain.file_exists(dest, "meta.json"):
+                    return
+                errors.append(f"{target_type}: nicht vorhanden")
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"{target_type}: {exc}")
+        raise RuntimeError("; ".join(errors) or "kein Speicherziel")
+    return fetch
+
+
+def _restore_into(fn, target: str, archive: Path, clear: bool) -> None:
+    if clear:
+        fn(target, archive, clear=True)
+    else:
+        fn(target, archive)
 
 
 def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start: bool,
@@ -410,6 +463,10 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
                     dest = stage_dir / f"{sanitize_name(bind['destination'])}.tar"
                     restic_engine.dump_snapshot_to_file(repo_url, r_env, password, sid, dest)
                     bind_files_restic.append((bind["source"], dest))
+                if snapshot_ids.get("__image__"):
+                    # Incremental restic backups keep the image in the repo too
+                    restic_engine.dump_snapshot_to_file(repo_url, r_env, password, snapshot_ids["__image__"],
+                                                        stage_dir / "image.tar")
             finally:
                 if smb_conf_path:
                     try:
@@ -455,7 +512,9 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
 
         on_progress(step, "Loading image", total_steps)
         local_image_tar = backup_dir / "image.tar"
-        if not local_image_tar.exists() and streamed_target_id is not None and stream_target:
+        if not local_image_tar.exists() and stage_dir_ctx is not None and (stage_dir / "image.tar").exists():
+            local_image_tar = stage_dir / "image.tar"
+        elif not local_image_tar.exists() and streamed_target_id is not None and stream_target:
             target_type, target_config_json, _target_id = stream_target
             dl_dest = stage_dir / "image.tar"
             storage_sync.download_from_target(
@@ -479,21 +538,34 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             step += 1
             mapped = _map_vol(vol_name)
             on_progress(step, f"Restoring volume {mapped}", total_steps)
+            clear = False
             if volume_base_dir:
                 Path(mapped).mkdir(parents=True, exist_ok=True)
             else:
                 existing_volumes = {v.name for v in client.volumes.list()}
                 if mapped not in existing_volumes:
                     _create_volume(client, mapped, volume_info.get(vol_name) or {})
+                else:
+                    # Overwriting: the volume must end up exactly as backed up -
+                    # files created after that point in time are removed.
+                    clear = overwrite
             if fmt == "tar":
-                restore_volume_from_tar(mapped, vol_file)
+                _restore_into(restore_volume_from_tar, mapped, vol_file, clear)
             else:
-                restore_volume_from_file(mapped, vol_file)
+                _restore_into(restore_volume_from_file, mapped, vol_file, clear)
 
+        file_bind_sources = {bm["source"] for bm in bind_mounts_meta if bm.get("is_file")}
+        remap_root_host = container_path_to_host(_BIND_REMAP_ROOT)
         for source, bind_file in all_bind_entries:
             step += 1
             on_progress(step, f"Restoring bind mount {source}", total_steps)
-            if _restic_restore:
+            if source in file_bind_sources and not str(source).startswith(remap_root_host):
+                # Single-file bind mount restored to its original host path: the
+                # archive holds it as entry "data" - put it back as that file
+                # (mounting the file itself as /data and extracting into it fails).
+                _extract_file_bind(client, str(Path(source).parent), bind_file,
+                                   "xf" if _restic_restore else "xzf", Path(source).name)
+            elif _restic_restore:
                 restore_volume_from_tar(source, bind_file)
             else:
                 restore_volume_from_file(source, bind_file)
@@ -602,3 +674,139 @@ def _restore_from_plaintext_dir(backup_dir: Path, new_name: Optional[str], start
             container.start()
 
     return container
+
+
+# ---------------------------------------------------------------------------
+# Single volume / bind mount restore (any backup level, any point in time)
+# ---------------------------------------------------------------------------
+
+def list_mounts(backup_dir: Path) -> dict:
+    """Volumes and bind mounts contained in a backup, for the restore dialog."""
+    meta = chain.read_meta(Path(backup_dir))
+    return {
+        "volumes": list(meta.get("volumes") or []),
+        "binds": [{"destination": b.get("destination"), "source": b.get("source"),
+                   "is_file": bool(b.get("is_file"))} for b in (meta.get("bind_mounts") or [])],
+        "level": meta.get("backup_level") or "full",
+        "data_as_of": meta.get("data_as_of") or meta.get("created_at"),
+    }
+
+
+def restore_mount(backup_dir: Path, kind: str, name: str, target: Optional[str] = None,
+                  replace: bool = True, stream_target: Optional[StreamTarget] = None,
+                  fetch_missing: chain.FetchMissing = None,
+                  on_progress: ProgressCallback = _noop_progress,
+                  on_log: chain.LogCallback = None) -> str:
+    """Restores just one volume (kind="volume", name=volume name) or one bind
+    mount (kind="bind", name=its container destination) of a backup.
+
+    target: another volume name / host directory to restore into (default:
+    the original one). replace=True empties the target first so it holds
+    exactly the backed-up state. Returns the restored target."""
+    if kind not in ("volume", "bind"):
+        raise ValueError("kind muss 'volume' oder 'bind' sein")
+    backup_dir = Path(backup_dir)
+    relative_key = storage_sync._relative_key(backup_dir)
+    if not backup_dir.exists():
+        if not stream_target:
+            raise RuntimeError("Dieses Backup existiert lokal nicht und es ist kein Speicherziel angegeben.")
+        on_progress(0, "Lade Backup vom Speicherziel herunter", 1)
+        storage_sync.download_full_backup_from_target(stream_target[0], stream_target[1], relative_key, backup_dir)
+    _require_key_if_encrypted(backup_dir)
+    meta = chain.read_meta(backup_dir)
+    if not meta:
+        raise RuntimeError("meta.json fehlt - keine gültige Container-Sicherung")
+    bind_meta = None
+    if kind == "volume":
+        if name not in (meta.get("volumes") or []):
+            raise RuntimeError(f"Volume '{name}' ist nicht in dieser Sicherung")
+    else:
+        bind_meta = next((b for b in meta.get("bind_mounts") or [] if b.get("destination") == name), None)
+        if not bind_meta:
+            raise RuntimeError(f"Bind-Mount '{name}' ist nicht in dieser Sicherung")
+
+    client = get_client()
+    with tempfile.TemporaryDirectory(dir=_staging_root(), prefix="dbm-mount-restore-") as tmp:
+        stage = Path(tmp)
+        on_progress(1, f"Bereite {name} vor", 3)
+        archive, flags = _obtain_mount_archive(backup_dir, meta, kind, name, bind_meta, stage,
+                                               stream_target, relative_key, fetch_missing, on_log)
+        on_progress(2, f"Stelle {name} wieder her", 3)
+        if kind == "volume":
+            dest = target or name
+            if dest not in {v.name for v in client.volumes.list()}:
+                _create_volume(client, dest, (meta.get("volume_info") or {}).get(name) or {})
+            _extract_mount(client, dest, archive, flags, clear=replace)
+        else:
+            dest = target or bind_meta.get("source")
+            if bind_meta.get("is_file"):
+                # The archive holds the file as entry "data": write it into the
+                # target directory under the file's original name.
+                _extract_file_bind(client, dest if target else str(Path(dest).parent), archive, flags,
+                                   Path(bind_meta.get("source") or "data").name)
+            else:
+                # Bind sources are paths on the Docker host - mounted as they are
+                _extract_mount(client, dest, archive, flags, clear=replace)
+        on_progress(3, "Fertig", 3)
+    return dest
+
+
+def _obtain_mount_archive(backup_dir: Path, meta: dict, kind: str, name: str, bind_meta: Optional[dict],
+                          stage: Path, stream_target, relative_key: str, fetch_missing, on_log):
+    """Returns (local archive path, tar flags) holding the complete data of one mount."""
+    if chain.is_chain_meta(meta):
+        fetch = fetch_missing or fetcher_for_targets([stream_target] if stream_target else [])
+        mount_meta = chain.materialize(backup_dir, stage, fetch_missing=fetch, on_log=on_log,
+                                       only_mount={"kind": kind, "name": name})
+        mount = chain._mount_by_name(mount_meta, kind, name)
+        return stage / mount["archive"], "xzf"
+    safe = sanitize_name(name)
+    filename = f"{safe}.tar.gz" if kind == "volume" else bind_meta.get("filename") or f"{safe}.tar.gz"
+    rel = f"{'volumes' if kind == 'volume' else 'binds'}/{filename}"
+    if meta.get("streamed_target_id") is not None:
+        if not stream_target:
+            raise RuntimeError("Die Daten liegen auf einem Speicherziel, das nicht mehr verfügbar ist.")
+        if meta.get("backup_engine") == "restic":
+            key = name if kind == "volume" else f"bind_{safe}"
+            sid = (meta.get("restic_snapshot_ids") or {}).get(key)
+            if not sid:
+                raise RuntimeError(f"Kein Restic-Snapshot für '{name}' gefunden")
+            repo_url, r_env, conf = restic_engine.repo_url_and_env(
+                stream_target[0], json.loads(stream_target[1]), meta.get("container_name", ""))
+            try:
+                dest = stage / f"{safe}.tar"
+                restic_engine.dump_snapshot_to_file(repo_url, r_env, meta.get("restic_password") or
+                                                    restic_engine.get_password(), sid, dest)
+            finally:
+                if conf:
+                    restic_engine.rclone_backends.discard_conf(conf)
+            return dest, "xf"
+        dest = stage / filename
+        storage_sync.download_from_target(stream_target[0], stream_target[1], f"{relative_key}/{rel}", dest)
+        return dest, "xzf"
+    dest = stage / filename
+    with chain.plain_file(backup_dir, rel) as p:
+        import shutil
+        shutil.copy2(p, dest)
+    return dest, "xzf"
+
+
+def _extract_mount(client, target: str, archive: Path, flags: str, clear: bool) -> None:
+    from app.backup_engine import _extract_into
+    _extract_into(target, archive, flags, clear)
+
+
+def _extract_file_bind(client, target_dir: str, archive: Path, flags: str, filename: str) -> None:
+    from app.backup_engine import _ensure_helper_image
+    _ensure_helper_image(client)
+    safe_name = filename.replace("'", "")
+    client.containers.run(
+        DOCKER_HELPER_IMAGE,
+        command=["sh", "-c", f"mkdir -p /tmp/x && tar {flags} /backup/{archive.name} -C /tmp/x && "
+                             f"cp -a /tmp/x/data '/data/{safe_name}'"],
+        volumes={
+            target_dir: {"bind": "/data", "mode": "rw"},
+            container_path_to_host(archive.parent.resolve()): {"bind": "/backup", "mode": "ro"},
+        },
+        remove=True,
+    )

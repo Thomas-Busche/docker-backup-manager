@@ -17,7 +17,11 @@ async function api(path, options = {}) {
   const isJson = res.headers.get("content-type")?.includes("application/json");
   const data = isJson ? await res.json() : null;
   if (!res.ok) {
-    throw new Error((data && data.detail) || `Request failed (${res.status})`);
+    const detail = data && data.detail;
+    const err = new Error((detail && typeof detail === "object" ? detail.message : detail) || `Request failed (${res.status})`);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
   }
   return data;
 }
@@ -652,6 +656,17 @@ async function pickStorageTargetsAndRun(title, runFn) {
     <div class="modal-overlay">
       <div class="modal">
         <h3>${title}</h3>
+        <div class="field">
+          <label>Backup-Art</label>
+          <select id="b-mode">
+            <option value="full">Vollbackup</option>
+            <option value="incremental">Inkrementell (setzt die Kette fort, sonst initiales Vollbackup)</option>
+          </select>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">
+            Inkrementell sichert nur geänderte Dateien. Nach 7 Inkrementen fasst die App die Kette
+            im Backup-Speicher zu einem neuen Vollbackup (Synthetic Full) zusammen.
+          </div>
+        </div>
         ${storageTargets.length ? `
         <div class="field">
           <label>Zusätzlich hochladen nach (neben dem lokalen Speicher)</label>
@@ -692,8 +707,9 @@ async function pickStorageTargetsAndRun(title, runFn) {
     const streamTargetEl = overlay.querySelector("#b-stream-target");
     const streamTargetId = streamTargetEl && streamTargetEl.value ? parseInt(streamTargetEl.value, 10) : null;
     const stopContainers = overlay.querySelector("#b-stop-containers").checked;
+    const mode = overlay.querySelector("#b-mode").value;
     overlay.remove();
-    await runFn(ids, streamTargetId, stopContainers);
+    await runFn(ids, streamTargetId, stopContainers, mode);
   });
   document.body.appendChild(overlay);
 }
@@ -726,14 +742,14 @@ async function containersPage() {
       <td><button class="btn">Backup jetzt</button></td>
     </tr>`);
     row.querySelector("button").addEventListener("click", async (e) => {
-      await pickStorageTargetsAndRun(`Backup für ${c.name}`, async (storageTargetIds, streamTargetId, stopContainers) => {
+      await pickStorageTargetsAndRun(`Backup für ${c.name}`, async (storageTargetIds, streamTargetId, stopContainers, mode) => {
         e.target.disabled = true;
         try {
           await api(`/api/containers/${encodeURIComponent(c.name)}/backup`, {
             method: "POST",
             body: JSON.stringify({
               storage_target_ids: storageTargetIds, stream_volumes_target_id: streamTargetId,
-              stop_container: stopContainers,
+              stop_container: stopContainers, backup_mode: mode,
             }),
           });
           toast(`Backup für ${c.name} gestartet`);
@@ -746,13 +762,13 @@ async function containersPage() {
   });
 
   wrap.querySelector("#backup-all-btn").addEventListener("click", async () => {
-    await pickStorageTargetsAndRun("Gesamte Landschaft sichern", async (storageTargetIds, streamTargetId, stopContainers) => {
+    await pickStorageTargetsAndRun("Gesamte Landschaft sichern", async (storageTargetIds, streamTargetId, stopContainers, mode) => {
       try {
         await api("/api/backups/landscape", {
           method: "POST",
           body: JSON.stringify({
             storage_target_ids: storageTargetIds, stream_volumes_target_id: streamTargetId,
-            stop_containers: stopContainers,
+            stop_containers: stopContainers, backup_mode: mode,
           }),
         });
         toast("Landschafts-Backup gestartet");
@@ -808,6 +824,18 @@ async function backupsPage() {
     }).join(" ");
   }
 
+  // Chains per container: for a group backup those of its members (hidden in the list below)
+  function chainGroupsFor(name, versions, isLandscape) {
+    const groups = {};
+    if (isLandscape) {
+      const members = [...new Set(versions.flatMap((v) => v.member_names || []))].sort();
+      members.forEach((m) => { if ((data.groups[m] || []).some((v) => v.chain_id)) groups[m] = data.groups[m]; });
+    } else if (versions.some((v) => v.chain_id)) {
+      groups[name] = versions;
+    }
+    return Object.keys(groups).length ? groups : null;
+  }
+
   function buildAccordion(name, versions, isLandscape) {
     // For landscapes, sum the member_size_bytes across versions (the landscape
     // record itself is just a tiny metadata file — the real data is in the members)
@@ -834,6 +862,7 @@ async function backupsPage() {
             <span style="margin-left:4px;">${headerBadges}</span>
           </div>
           <div style="display:flex; align-items:center; gap:10px;">
+            ${chainGroupsFor(name, versions, isLandscape) ? `<button class="btn chain-view-btn" style="font-size:.78rem; padding:5px 10px;">⛓ Sicherungskette${isLandscape ? "n" : ""}</button>` : ''}
             ${isLandscape ? '<button class="btn danger delete-all-btn" style="font-size:.78rem; padding:5px 10px;">Alle löschen</button>' : ''}
             <div class="muted">${fmtDate(versions[0].created_at)}</div>
           </div>
@@ -846,7 +875,7 @@ async function backupsPage() {
           <table>
             <thead><tr>
               <th style="width:36px; padding-right:0;"><input type="checkbox" class="select-all-cb" style="width:auto; margin:0; cursor:pointer;" title="Alle auswählen"></th>
-              <th>Erstellt</th><th>Größe</th><th>Speicherort</th><th>Status</th><th></th>
+              <th>Erstellt</th><th>Art</th><th>Größe</th><th>Speicherort</th><th>Status</th><th></th>
             </tr></thead>
             <tbody></tbody>
           </table>
@@ -856,6 +885,8 @@ async function backupsPage() {
     const head = acc.querySelector(".accordion-head");
     const body = acc.querySelector(".accordion-body");
     head.addEventListener("click", () => { body.style.display = body.style.display === "none" ? "block" : "none"; });
+    const chainBtn = acc.querySelector(".chain-view-btn");
+    if (chainBtn) chainBtn.addEventListener("click", (e) => { e.stopPropagation(); openChainModal(name, chainGroupsFor(name, versions, isLandscape)); });
 
     if (isLandscape) {
       const deleteAllBtn = acc.querySelector(".delete-all-btn");
@@ -905,8 +936,10 @@ async function backupsPage() {
       bulkDeleteBtn.disabled = true;
       bulkDeleteBtn.textContent = "Löschen …";
       try {
-        await api("/api/backups/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) });
-        toast(`${ids.length} Backup${ids.length === 1 ? "" : "s"} gelöscht`);
+        const res = await api("/api/backups/bulk-delete", { method: "POST", body: JSON.stringify({ ids }) });
+        const skipped = (res.skipped_chain_bases || []).length;
+        if (skipped) toast(`${res.deleted} gelöscht, ${skipped} übersprungen: werden von späteren Inkrementen noch benötigt`, "error");
+        else toast(`${ids.length} Backup${ids.length === 1 ? "" : "s"} gelöscht`);
         navigate("backups");
       } catch (err) {
         toast(err.message, "error");
@@ -921,13 +954,14 @@ async function backupsPage() {
       const row = h(`<tr>
         <td style="width:36px; padding-right:0; vertical-align:middle;"><input type="checkbox" class="row-cb" data-id="${v.id}" style="width:auto; margin:0; cursor:pointer;"></td>
         <td>${fmtDate(v.created_at)}</td>
+        <td>${isLsc ? '<span class="badge neutral">Gruppe</span>' : levelBadge(v)}</td>
         <td>${fmtBytes(displaySize)}</td>
         <td>${targetBadges(v.synced_target_ids, v.streamed_target_id)}</td>
         <td><span class="badge ${v.status === "ok" ? "ok" : "failed"}">${v.status}</span></td>
         <td style="display:flex; gap:8px;">
           ${isLsc
             ? '<button class="btn primary members-btn">🗺️ Mitglieder &amp; Restore</button>'
-            : '<button class="btn restore-btn">↩ Wiederherstellen</button>'}
+            : '<button class="btn restore-btn">↩ Wiederherstellen</button><button class="btn verify-btn" title="Integrität prüfen: Kette vollständig, Prüfsummen, jede Datei wiederherstellbar">🔍 Prüfen</button>'}
           <button class="btn download-btn">⬇ Download</button>
           <button class="btn danger delete-btn">Löschen</button>
         </td>
@@ -935,6 +969,8 @@ async function backupsPage() {
       row.querySelector(".row-cb").addEventListener("change", updateBulkUI);
       const restoreBtn = row.querySelector(".restore-btn");
       if (restoreBtn) restoreBtn.addEventListener("click", () => openRestoreModal(v));
+      const verifyBtn = row.querySelector(".verify-btn");
+      if (verifyBtn) verifyBtn.addEventListener("click", () => startVerify(v));
       const membersBtn = row.querySelector(".members-btn");
       if (membersBtn) membersBtn.addEventListener("click", () => openLandscapeMembersModal(v));
       const downloadBtn = row.querySelector(".download-btn");
@@ -952,9 +988,7 @@ async function backupsPage() {
         btn.disabled = true;
         btn.textContent = "Löschen …";
         try {
-          const res = await api(`/api/backups/${v.id}`, { method: "DELETE" });
-          if (res.warning) toast(res.warning, "error");
-          else toast("Backup gelöscht");
+          await deleteBackupVersion(v);
           navigate("backups");
         } catch (e) { toast(e.message, "error"); btn.disabled = false; btn.textContent = "Löschen"; }
       });
@@ -974,13 +1008,146 @@ async function backupsPage() {
   return wrap;
 }
 
+const LEVEL_LABELS = { full: "Voll", incremental: "Inkrementell", synthetic_full: "Synthetic Full", restic: "Inkrementell (Restic)" };
+
+function levelBadge(v) {
+  const level = v.backup_level || "full";
+  const deps = (v.depends_on_ids || []).length;
+  const cls = { full: "neutral", incremental: "running", synthetic_full: "ok", restic: "running" }[level] || "neutral";
+  const missing = (v.missing_dependencies || []).length;
+  let title = level === "incremental" ? `Braucht ${deps} ältere Sicherung(en) der Kette` : "Eigenständig wiederherstellbar";
+  if (level === "synthetic_full" && v.data_as_of) title += ` · Datenstand ${fmtDateLong(v.data_as_of)}`;
+  if (v.dependents_count) title += ` · Basis für ${v.dependents_count} spätere Sicherung(en)`;
+  if (level === "restic") title = "Restic: dedupliziert, jeder Snapshot ist ein vollständiger Stand";
+  return `<span class="badge ${missing ? "failed" : cls}" title="${escAttr(title)}">${LEVEL_LABELS[level] || level}${missing ? " ⚠" : ""}</span>`;
+}
+
+async function deleteBackupVersion(v) {
+  try {
+    const res = await api(`/api/backups/${v.id}`, { method: "DELETE" });
+    if (res && res.warning) toast(res.warning, "error"); else toast("Backup gelöscht");
+  } catch (err) {
+    if (err.status !== 409 || !err.detail || !err.detail.dependents) throw err;
+    const n = err.detail.dependents.length;
+    if (!confirm(`${err.detail.message}\n\nDie Kette ab hier komplett löschen (diese und ${n} spätere Sicherung(en))?`)) {
+      throw new Error("Nicht gelöscht: wird von späteren Inkrementen benötigt");
+    }
+    await api(`/api/backups/${v.id}?with_dependents=true`, { method: "DELETE" });
+    toast(`Kette gelöscht (${n + 1} Sicherungen)`);
+  }
+}
+
+async function startVerify(v) {
+  try {
+    await api(`/api/backups/${v.id}/verify`, { method: "POST" });
+    toast("Integritätsprüfung gestartet - Ergebnis im Job-Fenster");
+    pollGlobalJobs();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+function openChainModal(name, groups) {
+  const multi = Object.keys(groups).length > 1;
+  const sections = Object.entries(groups).map(([container, versions]) => {
+    // Oldest first; group by chain, chains in order of their first backup
+    const ordered = [...versions].filter((v) => v.backup_type === "container").sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const chains = [];
+    const byChain = {};
+    ordered.forEach((v) => {
+      const key = v.chain_id || `single-${v.id}`;
+      if (!byChain[key]) { byChain[key] = []; chains.push({ key, items: byChain[key] }); }
+      byChain[key].push(v);
+    });
+    return { container, ordered, chains };
+  });
+  const nodeHtml = (v, idx) => {
+    const level = v.backup_level || "full";
+    const label = level === "incremental" ? `Inkrementell ${idx}` : (LEVEL_LABELS[level] || level);
+    const asOf = level === "synthetic_full" && v.data_as_of ? `<div class="chain-node-sub">Stand ${fmtDate(v.data_as_of)}</div>` : "";
+    return `<div class="chain-node chain-${level}" data-id="${v.id}" tabindex="0">
+      <div class="chain-node-title">${escHtml(label)}</div>
+      <div class="chain-node-sub">${fmtDate(v.created_at)}</div>${asOf}
+      <div class="chain-node-sub">${fmtBytes(v.size_bytes || 0)}${(v.depends_on_ids || []).length ? ` · braucht ${(v.depends_on_ids || []).length}` : ""}</div>
+      <div class="chain-node-actions">
+        <button class="btn chain-restore" title="Diesen Zeitpunkt wiederherstellen">↩</button>
+        <button class="btn chain-verify" title="Integrität prüfen">🔍</button>
+      </div>
+    </div>`;
+  };
+  const chainsHtml = sections.map(({ container, chains }) => `${multi ? `<div class="chain-container-title">📦 ${escHtml(container)}</div>` : ""}` + chains.map((c, ci) => {
+    const first = c.items[0];
+    const isChain = first.chain_id;
+    let incIdx = 0;
+    const nodes = c.items.map((v) => nodeHtml(v, (v.backup_level === "incremental") ? ++incIdx : 0)).join('<div class="chain-arrow">→</div>');
+    const synthHint = first.backup_level === "synthetic_full" ? '<div class="chain-merge">⇒ im Backup-Speicher aus der vorherigen Kette zusammengeführt</div>' : "";
+    return `<div class="chain-row">
+      <div class="chain-row-head">${isChain ? `Kette ${ci + 1}` : "Einzelne Sicherung"} <span class="muted">(${c.items.length} Sicherung${c.items.length === 1 ? "" : "en"}, ${fmtBytes(c.items.reduce((s, v) => s + (v.size_bytes || 0), 0))})</span></div>
+      ${synthHint}
+      <div class="chain-flow">${nodes}</div>
+    </div>`;
+  }).join("")).join("");
+  const overlay = h(`
+    <div class="modal-overlay">
+      <div class="modal chain-modal">
+        <h3>Sicherungskette: ${escHtml(name)}</h3>
+        <p class="muted" style="font-size:.8rem; margin-top:0;">
+          Ein initiales Vollbackup, danach nur Änderungen. Regelmäßig fasst die App die Kette im Backup-Speicher
+          zu einem <strong>Synthetic Full</strong> zusammen - ohne den Container erneut zu sichern.
+          Fahre über eine Sicherung, um zu sehen, welche Teile sie für die Wiederherstellung braucht.
+        </p>
+        <div class="chain-legend">
+          <span class="badge neutral">Voll</span><span class="badge running">Inkrementell</span><span class="badge ok">Synthetic Full</span>
+        </div>
+        <div class="chain-list">${chainsHtml || '<div class="empty-state">Keine Container-Sicherungen</div>'}</div>
+        <div class="row-actions"><button class="btn" id="close-btn">Schließen</button></div>
+      </div>
+    </div>`);
+  const byId = Object.fromEntries(sections.flatMap((sec) => sec.ordered).map((v) => [v.id, v]));
+  overlay.querySelectorAll(".chain-node").forEach((node) => {
+    const v = byId[node.dataset.id];
+    const highlight = (on) => {
+      node.classList.toggle("chain-focus", on);
+      (v.depends_on_ids || []).forEach((id) => {
+        const dep = overlay.querySelector(`.chain-node[data-id="${id}"]`);
+        if (dep) dep.classList.toggle("chain-needed", on);
+      });
+    };
+    node.addEventListener("mouseenter", () => highlight(true));
+    node.addEventListener("mouseleave", () => highlight(false));
+    node.addEventListener("focus", () => highlight(true));
+    node.addEventListener("blur", () => highlight(false));
+    node.querySelector(".chain-restore").addEventListener("click", () => { overlay.remove(); openRestoreModal(v); });
+    node.querySelector(".chain-verify").addEventListener("click", () => startVerify(v));
+  });
+  overlay.querySelector("#close-btn").addEventListener("click", () => overlay.remove());
+  document.body.appendChild(overlay);
+}
+
 function openRestoreModal(version) {
   const overlay = h(`
     <div class="modal-overlay">
       <div class="modal" style="width:500px">
         <h3>Backup wiederherstellen</h3>
-        <p style="margin-bottom:4px; font-size:14px;">Stand: <strong>${fmtDateLong(version.created_at)}</strong></p>
-        <p class="muted" style="margin-bottom:16px; font-size:12px;">Der Container wird auf genau diesen Zeitpunkt zurückgesetzt.</p>
+        <p style="margin-bottom:4px; font-size:14px;">Stand: <strong>${fmtDateLong(version.data_as_of || version.created_at)}</strong> ${levelBadge(version)}</p>
+        <p class="muted" style="margin-bottom:12px; font-size:12px;">${version.backup_level === "incremental"
+          ? "Dieser Zeitpunkt wird aus der Sicherungskette zusammengesetzt (jede Datei wird dabei per Prüfsumme kontrolliert). "
+          : ""}Der Container wird auf genau diesen Zeitpunkt zurückgesetzt.</p>
+        <div class="field">
+          <label>Was wiederherstellen?</label>
+          <select id="restore-scope">
+            <option value="container">Ganzen Container (Image, Konfiguration, alle Volumes)</option>
+          </select>
+        </div>
+        <div id="restore-mount-fields" style="display:none">
+          <div class="field">
+            <label>Wiederherstellen nach <span class="muted">(leer = Original)</span></label>
+            <input type="text" id="restore-mount-target" placeholder="Volume-Name bzw. Verzeichnis auf dem Host" />
+          </div>
+          <div class="field">
+            <label><input type="checkbox" id="restore-mount-replace" checked style="width:auto; margin-right:6px;" />
+            Ziel vorher leeren <span class="muted">(exakter Stand, später entstandene Dateien werden entfernt)</span></label>
+          </div>
+        </div>
+        <div id="restore-container-fields">
         <div class="field">
           <label>Neuer Container-Name <span class="muted">(leer = Originalname)</span></label>
           <input type="text" id="restore-name" placeholder="z.B. immich_server_01_test" />
@@ -997,6 +1164,7 @@ function openRestoreModal(version) {
         <div class="field">
           <label><input type="checkbox" id="restore-start" checked style="width:auto; margin-right:6px;" />Container nach Wiederherstellung starten</label>
         </div>
+        </div>
         <div class="row-actions">
           <button class="btn" id="cancel-btn">Abbrechen</button>
           <button class="btn primary" id="confirm-btn">Wiederherstellen</button>
@@ -1005,7 +1173,35 @@ function openRestoreModal(version) {
     </div>
   `);
   overlay.querySelector("#cancel-btn").addEventListener("click", () => overlay.remove());
+  const scopeSel = overlay.querySelector("#restore-scope");
+  api(`/api/backups/${version.id}/contents`).then((c) => {
+    (c.volumes || []).forEach((vol) => scopeSel.appendChild(h(`<option value="volume:${escAttr(vol)}">Nur Volume: ${escHtml(vol)}</option>`)));
+    (c.binds || []).forEach((b) => scopeSel.appendChild(h(`<option value="bind:${escAttr(b.destination)}">Nur Bind-Mount: ${escHtml(b.destination)} (${escHtml(b.source || "")})</option>`)));
+  }).catch(() => {});
+  scopeSel.addEventListener("change", () => {
+    const single = scopeSel.value !== "container";
+    overlay.querySelector("#restore-mount-fields").style.display = single ? "block" : "none";
+    overlay.querySelector("#restore-container-fields").style.display = single ? "none" : "block";
+  });
   overlay.querySelector("#confirm-btn").addEventListener("click", async (e) => {
+    if (scopeSel.value !== "container") {
+      const [kind, ...rest] = scopeSel.value.split(":");
+      const btn = e.currentTarget;
+      btn.disabled = true; btn.textContent = "Starte …";
+      try {
+        await api(`/api/backups/${version.id}/restore-mount`, {
+          method: "POST", body: JSON.stringify({
+            kind, name: rest.join(":"),
+            target: overlay.querySelector("#restore-mount-target").value.trim() || null,
+            replace: overlay.querySelector("#restore-mount-replace").checked,
+          }),
+        });
+        toast("Wiederherstellung gestartet");
+        pollGlobalJobs();
+        overlay.remove();
+      } catch (err) { toast(err.message, "error"); btn.disabled = false; btn.textContent = "Wiederherstellen"; }
+      return;
+    }
     const newName = overlay.querySelector("#restore-name").value.trim();
     const renameVolumes = overlay.querySelector("#restore-rename-vols").checked;
     const volumeBaseDir = overlay.querySelector("#restore-vol-dir").value.trim();
@@ -1073,6 +1269,7 @@ async function openLandscapeMembersModal(version) {
     const row = h(`<div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0; border-bottom:1px solid var(--border); gap:8px;">
       <span style="font-weight:500">${escHtml(m.container_name)}</span>
       <div style="display:flex; align-items:center; gap:8px;">
+        ${m.backup_level ? levelBadge({ backup_level: m.backup_level }) : ""}
         ${statusBadge}
         ${ok ? '<button class="btn" style="padding:2px 10px; font-size:13px;">Einzeln</button>' : ''}
       </div>
@@ -1080,7 +1277,7 @@ async function openLandscapeMembersModal(version) {
     const btn = row.querySelector("button");
     if (btn) btn.addEventListener("click", () => {
       overlay.remove();
-      openRestoreModal({ id: m.backup_id, created_at: m.created_at || version.created_at });
+      openRestoreModal({ id: m.backup_id, created_at: m.created_at || version.created_at, backup_level: m.backup_level });
     });
     list.appendChild(row);
   });
@@ -1162,7 +1359,8 @@ async function schedulesPage() {
         : s.name_contains ? `Name enthält: ${s.name_contains}`
         : s.project_filter ? `Projekt: ${s.project_filter}` : "Gesamte Landschaft"}</td>
       <td>${describeCron(s.cron_expression)}</td>
-      <td>${s.retention_count > 0 ? s.retention_count + " Versionen" : ""}${s.retention_days > 0 ? " / " + s.retention_days + " Tage" : ""}</td>
+      <td>${s.retention_count > 0 ? s.retention_count + " Versionen" : ""}${s.retention_days > 0 ? " / " + s.retention_days + " Tage" : ""}
+          ${s.backup_mode === "incremental" ? `<div><span class="badge running" title="Inkrementell, Synthetic Full nach ${s.synthetic_full_every} Inkrementen">Inkrementell${s.synthetic_full_every ? ` · SF/${s.synthetic_full_every}` : ""}</span></div>` : ""}</td>
       <td>${targetNames.length ? targetNames.join(", ") : '<span class="muted">nur lokal</span>'}</td>
       <td>${fmtDate(s.last_run_at)}</td>
       <td>${s.last_status ? `<span class="badge ${s.last_status === "ok" ? "ok" : "failed"}">${s.last_status}</span>` : '<span class="badge neutral">nie ausgeführt</span>'}
@@ -1294,6 +1492,33 @@ async function openScheduleModal(existing) {
             ${Array.from({ length: 28 }, (_, i) => i + 1).map((d) => `<option value="${d}" ${String(d) === cronFields.monthday ? "selected" : ""}>${d}.</option>`).join("")}
           </select>
         </div>
+        <div class="field">
+          <label>Backup-Art</label>
+          <select id="s-backup-mode">
+            <option value="full">Jedes Mal Vollbackup</option>
+            <option value="incremental">Inkrementell mit Synthetic Full (empfohlen)</option>
+          </select>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">
+            Inkrementell: einmal ein Vollbackup, danach werden nur geänderte, neue und gelöschte Dateien gesichert.
+            Regelmäßig fasst die App die Kette direkt im Backup-Speicher zu einem neuen Vollbackup zusammen
+            (Synthetic Full) - der Container wird dafür nicht erneut gesichert. Jeder Zeitpunkt bleibt wiederherstellbar.
+          </div>
+        </div>
+        <div id="s-chain-fields">
+          <div class="field"><label>Synthetic Full nach so vielen Inkrementen (0 = nie)</label>
+            <input type="text" id="s-synth-every" value="${existing && existing.synthetic_full_every != null ? existing.synthetic_full_every : 7}" /></div>
+          <div class="field">
+            <label>Nach einem Synthetic Full: zusammengeführte Inkremente …</label>
+            <select id="s-keep-merged">
+              <option value="keep">behalten (für ältere Zeitpunkte, Aufbewahrung entscheidet)</option>
+              <option value="delete">sofort löschen (spart Platz, ältere Zwischenstände entfallen; nicht bei Gruppen)</option>
+            </select>
+          </div>
+          <div class="muted" style="font-size:.75rem; margin:-6px 0 12px;">
+            Die Aufbewahrung löscht nie eine Sicherung, die ein behaltener Stand noch braucht - eine Kette
+            verschwindet erst, wenn keiner ihrer Zeitpunkte mehr behalten wird.
+          </div>
+        </div>
         <div class="field"><label>Aufbewahrung: Anzahl Versionen (0 = unbegrenzt)</label><input type="text" id="s-ret-count" value="${existing ? existing.retention_count : 7}" /></div>
         <div class="field"><label>Aufbewahrung: Tage (0 = deaktiviert)</label><input type="text" id="s-ret-days" value="${existing ? existing.retention_days : 0}" /></div>
         <div class="field">
@@ -1347,7 +1572,13 @@ async function openScheduleModal(existing) {
       overlay.querySelector("#s-stream-target").value = String(existing.stream_volumes_target_id);
     }
     overlay.querySelector("#s-stop-containers").checked = !!existing.stop_containers;
+    overlay.querySelector("#s-backup-mode").value = existing.backup_mode || "full";
+    overlay.querySelector("#s-keep-merged").value = existing.keep_merged_incrementals === false ? "delete" : "keep";
   }
+  const modeSel = overlay.querySelector("#s-backup-mode");
+  const syncChainFields = () => { overlay.querySelector("#s-chain-fields").style.display = modeSel.value === "incremental" ? "block" : "none"; };
+  modeSel.addEventListener("change", syncChainFields);
+  syncChainFields();
   overlay.querySelector("#s-target-type").addEventListener("change", (e) => {
     overlay.querySelector("#s-container-field").style.display = e.target.value === "container" ? "block" : "none";
     overlay.querySelector("#s-project-field").style.display = e.target.value === "landscape" ? "block" : "none";
@@ -1399,6 +1630,9 @@ async function openScheduleModal(existing) {
         ? parseInt(overlay.querySelector("#s-stream-target").value, 10) : null,
       exclude_names: overlay.querySelector("#s-exclude-names").value.trim() || null,
       stop_containers: overlay.querySelector("#s-stop-containers").checked,
+      backup_mode: overlay.querySelector("#s-backup-mode").value,
+      synthetic_full_every: parseInt(overlay.querySelector("#s-synth-every").value || "0", 10),
+      keep_merged_incrementals: overlay.querySelector("#s-keep-merged").value !== "delete",
       enabled: existing ? existing.enabled : true,
     };
     try {

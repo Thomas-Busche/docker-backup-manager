@@ -9,7 +9,7 @@ from pathlib import Path
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app import backup_engine, event_log, job_tracker, netpulse, restic_engine, storage_sync
+from app import backup_engine, backup_records, event_log, job_tracker, netpulse, restic_engine, storage_sync
 from app.config import BACKUPS_DIR, TZ_NAME
 from app.database import SessionLocal
 from app.models import BackupRecord, Schedule
@@ -60,7 +60,8 @@ def run_schedule(schedule_id: int):
                 result = backup_engine.backup_container(sched.target_ref, BACKUPS_DIR, on_progress=progress,
                                                           stream_target=stream_target, should_cancel=should_cancel,
                                                           stop_container=sched.stop_containers, on_bytes=on_bytes,
-                                                          on_upload_bytes=on_upload_bytes, on_log=on_log)
+                                                          on_upload_bytes=on_upload_bytes, on_log=on_log,
+                                                          **_chain_kwargs(sched))
             else:
                 result = backup_engine.backup_landscape(BACKUPS_DIR, project_filter=sched.project_filter,
                                                           name_contains=sched.name_contains,
@@ -68,53 +69,16 @@ def run_schedule(schedule_id: int):
                                                           label=sched.name, on_progress=progress,
                                                           stream_target=stream_target, should_cancel=should_cancel,
                                                           stop_containers=sched.stop_containers, on_bytes=on_bytes,
-                                                          on_upload_bytes=on_upload_bytes, on_log=on_log)
+                                                          on_upload_bytes=on_upload_bytes, on_log=on_log,
+                                                          **_chain_kwargs(sched))
 
-            record = BackupRecord(
-                backup_type=sched.target_type,
-                name=result.name,
-                path=str(result.path),
-                status="ok" if result.ok else "failed",
-                error=result.error,
-                size_bytes=result.size_bytes,
-                containers_json=json.dumps(result.containers),
-                streamed_target_id=result.streamed_target_id,
-            )
-            db.add(record)
-            db.commit()
+            def upload_progress(label, idx, total):
+                progress(1, label, 1)
 
-            # Each member container backup of a landscape run lives in its own
-            # directory with real data (image, volumes) - without its own
-            # record it'd be invisible in the UI, never deletable, and never
-            # subject to retention, even though it still takes up disk space.
-            member_records = []
-            for member in result.member_results:
-                member_record = BackupRecord(
-                    backup_type="container", name=member.name, path=str(member.path),
-                    status="ok" if member.ok else "failed", error=member.error,
-                    size_bytes=member.size_bytes, containers_json=json.dumps([member.name]),
-                    streamed_target_id=member.streamed_target_id,
-                )
-                db.add(member_record)
-                member_records.append(member_record)
-            db.commit()
-
-            if result.ok:
-                def upload_progress(label, idx, total):
-                    progress(1, label, 1)
-
-                target_ids = json.loads(sched.storage_target_ids or "[]")
-                # Uploads the member container backups of a landscape too, and
-                # copies the metadata folders to the streaming target so a
-                # catalog import on a new host finds them (see storage_sync).
-                ok_members = [m for m in member_records if m.status == "ok" and Path(m.path).exists()]
-                sync_results, member_synced = storage_sync.sync_backup_with_members(
-                    result.path, [m.path for m in ok_members], target_ids,
-                    stream_target=stream_target, on_progress=upload_progress)
-                record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
-                for m in ok_members:
-                    m.synced_target_ids = json.dumps(member_synced.get(m.path, []))
-                db.commit()
+            record = backup_records.persist_result(
+                db, result, sched.target_type, json.loads(sched.storage_target_ids or "[]"),
+                stream_target=stream_target, on_progress=upload_progress,
+                keep_merged_incrementals=_keep_merged(sched), delete_record=_delete_record_for_retention)
 
             if result.cancelled:
                 job_tracker.cancel_job(job.id)
@@ -161,31 +125,40 @@ def _apply_retention(db, sched: Schedule):
 
     versions = [VersionInfo(id=r.id, created_at=r.created_at) for r in records]
     prune_ids = {v.id for v in versions_to_prune(versions, sched.retention_count, sched.retention_days)}
+    prune_ids = _protect_chain_dependencies(db, records, prune_ids)
     if not prune_ids:
         return
-    for r in records:
+    # Newest first: an incremental is deleted before the older chain members it needs
+    for r in sorted(records, key=lambda r: r.created_at, reverse=True):
         if r.id not in prune_ids:
             continue
         try:
             # Landscape-Records: zuerst Member-Container-Records löschen
             if r.backup_type == "landscape" and Path(r.path).exists():
-                for jf in sorted(Path(r.path).glob("*.json")):
+                from app.routers.backups import _read_member_jsons  # also reads encrypted *.json.enc
+                for data in _read_member_jsons(Path(r.path)):
                     try:
-                        data = json.loads(jf.read_text())
                         member_name = data.get("container_name", "")
-                        member_path = data.get("backup_path", "")
-                        if not member_path:
-                            continue
-                        member = (
-                            db.query(BackupRecord)
-                            .filter(BackupRecord.path == member_path, BackupRecord.name == member_name)
-                            .first()
-                        )
-                        if not member:
-                            continue
-                        _delete_record_for_retention(member, db)
+                        # The synthetic full of the same run first (it's newer), then the member itself
+                        for member_path in (data.get("synthetic_path", ""), data.get("backup_path", "")):
+                            if not member_path:
+                                continue
+                            member = (
+                                db.query(BackupRecord)
+                                .filter(BackupRecord.path == member_path, BackupRecord.name == member_name)
+                                .first()
+                            )
+                            if not member:
+                                continue
+                            if backup_records.dependents(db, member):
+                                # A kept incremental still builds on this member - it
+                                # stays as a restore point of its own container.
+                                logger.info("Retention: %s bleibt (Basis einer Sicherungskette)", member.path)
+                                continue
+                            _delete_record_for_retention(member, db)
                     except Exception:  # noqa: BLE001
-                        logger.exception("Retention: Fehler beim Löschen von Landscape-Mitglied %s", jf.stem)
+                        logger.exception("Retention: Fehler beim Löschen von Landscape-Mitglied %s",
+                                         data.get("container_name"))
 
             _delete_record_for_retention(r, db)
             # Commit per record: if a later deletion in this batch fails, already
@@ -195,6 +168,44 @@ def _apply_retention(db, sched: Schedule):
         except Exception:  # noqa: BLE001
             logger.exception("Retention: failed to prune backup %s (id=%s)", r.path, r.id)
             db.rollback()
+
+
+def _chain_kwargs(sched: Schedule) -> dict:
+    if (getattr(sched, "backup_mode", None) or "full") != "incremental":
+        return {}
+    return {
+        "backup_mode": (getattr(sched, "backup_mode", None) or "full"),
+        "synthetic_full_every": int(getattr(sched, "synthetic_full_every", 0) or 0),
+    }
+
+
+def _keep_merged(sched: Schedule) -> bool:
+    value = getattr(sched, "keep_merged_incrementals", True)
+    return True if value is None else bool(value)
+
+
+def _protect_chain_dependencies(db, records: list, prune_ids: set) -> set:
+    """Never prune a backup that a kept backup of the same or another chain
+    still needs for its restore (base full / earlier incrementals). Applied
+    transitively: what a protected backup needs is protected too."""
+    if not prune_ids:
+        return prune_ids
+    by_path = {r.path: r for r in db.query(BackupRecord).all()}
+    kept = [r for r in by_path.values() if r.id not in prune_ids]
+    required: set = set()
+    todo = list(backup_records.required_paths(kept))
+    while todo:
+        path = todo.pop()
+        if path in required:
+            continue
+        required.add(path)
+        dep = by_path.get(path)
+        if dep is not None:
+            todo.extend(backup_records.depends_paths(dep))
+    protected = {r.id for r in records if r.id in prune_ids and r.path in required}
+    if protected:
+        logger.info("Retention: %d Sicherung(en) bleiben als Basis behaltener Inkremente", len(protected))
+    return prune_ids - protected
 
 
 def add_or_update_job(sched: Schedule):

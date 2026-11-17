@@ -30,6 +30,7 @@ Das Tool spricht ausschließlich mit der **Docker Engine API** (über den Docker
   - [Container stoppen (anwendungskonsistent)](#container-stoppen-anwendungskonsistent)
   - [Volumes direkt streamen](#volumes-direkt-streamen)
 - [Zeitpläne & Aufbewahrung](#zeitpläne--aufbewahrung)
+- [Inkrementelle Backups & Synthetic Full](#inkrementelle-backups--synthetic-full)
 - [Wiederherstellen](#wiederherstellen)
   - [Einzelnen Container wiederherstellen](#einzelnen-container-wiederherstellen)
   - [Gruppe wiederherstellen (Landscape)](#gruppe-wiederherstellen-landscape)
@@ -336,6 +337,29 @@ Unter **Zeitpläne** lassen sich automatische Backups einrichten:
 **Aufbewahrung:** Werden beim Prüfen der Aufbewahrungsregel Versionen gelöscht, werden automatisch auch die Offsite-Kopien auf allen Speicherzielen entfernt. Bei Landscape-Backups werden auch die Mitglieds-Container-Backups mit bereinigt.
 
 **Log und Datenbankgröße:** Unter **Logs → Aufbewahrung** lässt sich einstellen, wie lange (Standard 90 Tage) und wie viele Einträge (Standard 50.000) das Log behält. Die Einstellung wird gespeichert und überlebt Neustarts. Jede Nacht um 03:30 werden ältere Einträge gelöscht und die Datenbankdatei verkleinert (sonntags vollständig per `VACUUM`). „Jetzt bereinigen“ macht beides sofort, die aktuelle Dateigröße steht oben auf der Logs-Seite. Startwerte ohne gespeicherte Einstellung: `DBM_LOG_RETENTION_DAYS`, `DBM_LOG_MAX_ENTRIES` (0 = unbegrenzt). Die Datenbank läuft im WAL-Modus. Liegt `/data` auf einem Netzlaufwerk (NFS/SMB), `DBM_DB_WAL=0` setzen.
+
+---
+
+## Inkrementelle Backups & Synthetic Full
+
+Pro Zeitplan (oder beim manuellen Backup) lässt sich **Backup-Art: Inkrementell mit Synthetic Full** wählen:
+
+1. **Initiales Vollbackup:** Beim ersten Lauf wird alles gesichert (Image, Konfiguration, alle Volumes und Bind-Mounts). Die Archive sind normale `tar.gz`, die sich notfalls auch ohne die App mit `tar xzf` auspacken lassen.
+2. **Inkrementelle Backups:** Danach werden nur noch geänderte und neue Dateien gesichert, gelöschte werden vermerkt. Jede Sicherung hält ein Verzeichnis *aller* Dateien zu ihrem Zeitpunkt (mit SHA-256 jeder Datei) und weiß, aus welcher älteren Sicherung jede unveränderte Datei stammt. Das Image wird nur neu gesichert, wenn es sich geändert hat.
+3. **Synthetic Full:** Nach *N* Inkrementen (Feld „Synthetic Full nach so vielen Inkrementen“, Standard 7) kombiniert die App das letzte Vollbackup mit allen Inkrementen **direkt im Backup-Speicher** zu einem neuen, eigenständigen Vollbackup. Der Container wird dafür nicht noch einmal gesichert, die Quelle wird also nicht belastet. Das Ergebnis wird sofort Datei für Datei gegen die Prüfsummen geprüft. Erst dann beginnt darauf eine neue Kette. Schlägt etwas fehl, bleibt die alte Kette unverändert und der nächste Lauf versucht es erneut.
+4. **Alte Daten verwalten:** Wahlweise bleiben die zusammengeführten Inkremente als ältere Zeitpunkte erhalten (die Aufbewahrung entscheidet) oder werden sofort gelöscht. Bei Gruppen-Backups entscheidet immer die Aufbewahrung.
+
+**Abhängigkeiten:** Die Aufbewahrung und das manuelle Löschen löschen nie eine Sicherung, die ein behaltener Zeitpunkt noch braucht. Eine Kette verschwindet erst, wenn keiner ihrer Zeitpunkte mehr behalten wird. Wer die Basis einer Kette löschen will, wird gefragt, ob die Kette ab dort komplett gelöscht werden soll.
+
+**Wiederherstellen:** Jeder Zeitpunkt der Kette lässt sich wiederherstellen: der ganze Container, eine ganze Gruppe („Alle wiederherstellen“), ein einzelnes Volume oder ein einzelner Bind-Mount (auch in ein anderes Volume bzw. Verzeichnis). Dabei setzt die App den Stand aus der Kette zusammen und prüft jede Datei per Prüfsumme. Beim Überschreiben wird das Volume vorher geleert, damit es exakt dem gesicherten Stand entspricht. Fehlt ein Kettenteil lokal (z. B. auf einem neuen Gerät nach „Katalog importieren“), wird er vom Speicherziel nachgeladen. Das funktioniert für jeden Zieltyp, der ganze Backup-Ordner herunterladen kann (lokaler Pfad, SMB, S3, rclone, SFTP, WebDAV, FTP, Azure, Dropbox; nicht Google Drive/OneDrive).
+
+**Integritätsprüfung:** „🔍 Prüfen“ an jeder Sicherung prüft, ob alle benötigten Kettenteile da sind, ob die Prüfsummen aller Archive stimmen und ob sich jede Datei aus der Kette korrekt wiederherstellen lässt. Bei Restic-Zielen läuft `restic check` mit einer Stichprobe der Daten.
+
+**Kettenansicht:** „⛓ Sicherungskette“ in der Backup-Übersicht zeigt Vollbackup, Inkremente und Synthetic Fulls je Container. Beim Darüberfahren werden die Teile markiert, die ein Zeitpunkt braucht.
+
+**Streaming-Ziele:** Mit restic (im Image enthalten) ist Streaming ohnehin inkrementell: restic dedupliziert, jeder Snapshot ist ein vollständiger Stand, ein Synthetic Full ist dort nicht nötig. Im inkrementellen Modus wandert auch das Image ins Restic-Repository, unveränderte Schichten belegen dann keinen neuen Platz. Ohne restic wird die Kette lokal geführt und danach aufs gewählte Ziel hochgeladen.
+
+**Wie Änderungen erkannt werden:** über Größe, Änderungszeit, Rechte, Eigentümer und Typ jeder Datei (wie rsync oder restic). Dafür wird das Volume bei jedem Lauf gelesen, gespeichert und hochgeladen werden aber nur die Änderungen.
 
 ---
 
