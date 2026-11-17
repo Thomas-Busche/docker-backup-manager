@@ -673,6 +673,8 @@ def export_config(db: Session = Depends(get_db), user: User = Depends(get_admin_
                 "cron_expression": s.cron_expression,
                 "retention_count": s.retention_count, "retention_days": s.retention_days,
                 "stop_containers": s.stop_containers, "enabled": s.enabled,
+                "backup_mode": s.backup_mode or "full", "synthetic_full_every": s.synthetic_full_every,
+                "keep_merged_incrementals": s.keep_merged_incrementals,
                 # stream/sync targets referenced by name so they survive re-import
                 "stream_target_name": next(
                     (t.name for t in targets if t.id == s.stream_volumes_target_id), None
@@ -762,6 +764,9 @@ def import_config(payload: ImportConfigPayload, db: Session = Depends(get_db),
                 retention_count=sd.get("retention_count", 7),
                 retention_days=sd.get("retention_days", 0),
                 stop_containers=sd.get("stop_containers", False),
+                backup_mode=sd.get("backup_mode") if sd.get("backup_mode") in ("full", "incremental") else "full",
+                synthetic_full_every=int(sd.get("synthetic_full_every", 7) or 0),
+                keep_merged_incrementals=bool(sd.get("keep_merged_incrementals", True)),
                 enabled=sd.get("enabled", True),
                 stream_volumes_target_id=stream_id,
                 storage_target_ids=sync_ids,

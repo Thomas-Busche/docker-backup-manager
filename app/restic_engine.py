@@ -723,3 +723,34 @@ def maybe_forget_restic(backup_path: Path, stream_target: Optional[tuple]) -> No
                 rclone_backends.discard_conf(smb_conf_path)
             except Exception:
                 pass
+
+
+# ---------------------------------------------------------------------------
+# Integrity check (incremental restic chains: every snapshot is a full state,
+# so "is the chain intact" == "is the repository intact")
+# ---------------------------------------------------------------------------
+
+def check_repo(repo_url: str, env: dict, password: str, read_data_subset: str = "5%") -> None:
+    """`restic check` with a random sample of the pack data re-read and
+    verified, so bit rot on the target is noticed without downloading it all."""
+    args = [RESTIC_BIN, "-r", repo_url, "check"]
+    if read_data_subset:
+        args += ["--read-data-subset", read_data_subset]
+    result = subprocess.run(args, capture_output=True, env=_full_env(env, password), timeout=6 * 3600)
+    if result.returncode != 0:
+        raise RuntimeError("restic check fehlgeschlagen: "
+                           + (result.stderr.decode(errors="replace").strip()
+                              or result.stdout.decode(errors="replace").strip()))
+
+
+def missing_snapshots(repo_url: str, env: dict, password: str, snapshot_ids: list[str]) -> list[str]:
+    result = subprocess.run([RESTIC_BIN, "-r", repo_url, "snapshots", "--json"], capture_output=True,
+                            env=_full_env(env, password), timeout=600)
+    if result.returncode != 0:
+        raise RuntimeError("restic snapshots fehlgeschlagen: " + result.stderr.decode(errors="replace").strip())
+    present = set()
+    for snap in json.loads(result.stdout.decode() or "[]"):
+        present.add(snap.get("id", ""))
+        present.add(snap.get("short_id", ""))
+    return [sid for sid in snapshot_ids
+            if not any(p and (p.startswith(sid) or sid.startswith(p)) for p in present)]

@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import backup_engine, encryption, event_log, job_tracker, netpulse, restic_engine, storage_sync
+from app import backup_engine, backup_records, chain, encryption, event_log, job_tracker, netpulse, restic_engine, storage_sync
 from app.auth import get_current_user
 from app.config import BACKUPS_DIR
 from app.database import SessionLocal, get_db
@@ -52,6 +52,13 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
             if existing is None or r.created_at > existing.created_at:
                 records_latest_by_name[r.name] = r
 
+    id_by_path = {r.path: r.id for r in records}
+    dependents_count: dict[int, int] = {}
+    for r in records:
+        for dep in backup_records.depends_paths(r):
+            if dep in id_by_path:
+                dependents_count[id_by_path[dep]] = dependents_count.get(id_by_path[dep], 0) + 1
+
     grouped: dict[str, list] = {}
     for r in records:
         if r.status == "failed":
@@ -66,6 +73,12 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
             "containers": json.loads(r.containers_json) if r.containers_json else [],
             "synced_target_ids": json.loads(r.synced_target_ids) if r.synced_target_ids else [],
             "streamed_target_id": r.streamed_target_id,
+            "backup_level": r.backup_level or "full",
+            "chain_id": r.chain_id,
+            "data_as_of": (r.data_as_of.isoformat() + "Z") if r.data_as_of else None,
+            "depends_on_ids": [id_by_path[d] for d in backup_records.depends_paths(r) if d in id_by_path],
+            "missing_dependencies": [d for d in backup_records.depends_paths(r) if d not in id_by_path],
+            "dependents_count": dependents_count.get(r.id, 0),
         }
         if r.backup_type == "landscape":
             member_names, member_size = _landscape_member_info(r, records_by_path, records_latest_by_name)
@@ -364,14 +377,19 @@ def delete_backups_bulk(payload: BulkDeletePayload, db: Session = Depends(get_db
 
     all_tasks: list[dict] = []
     deleted = 0
+    skipped: list[int] = []
+    deleting_ids = set(payload.ids)
 
-    for backup_id in payload.ids:
-        record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
-        if not record:
+    # Newest first, so incrementals go before the chain members they build on
+    ordered = db.query(BackupRecord).filter(BackupRecord.id.in_(payload.ids)).order_by(
+        BackupRecord.created_at.desc()).all()
+    for record in ordered:
+        if _chain_conflict(db, record, deleting_ids):
+            skipped.append(record.id)
             continue
         members: list[BackupRecord] = []
         if record.backup_type == "landscape":
-            members = _find_member_records(record, db)
+            members = [m for m in _find_member_records(record, db) if not _chain_conflict(db, m, {m.id})]
             for m in members:
                 all_tasks.append(_snapshot_remote_task(m, db, exclude_id=m.id))
         all_tasks.append(_snapshot_remote_task(record, db, exclude_id=record.id))
@@ -383,6 +401,7 @@ def delete_backups_bulk(payload: BulkDeletePayload, db: Session = Depends(get_db
                 _bg_logger.warning("Bulk-Löschung Mitglied %s: %s", m.name, exc)
         backup_engine.delete_backup(Path(record.path))
         db.delete(record)
+        db.flush()
         deleted += 1
 
     db.commit()
@@ -393,25 +412,60 @@ def delete_backups_bulk(payload: BulkDeletePayload, db: Session = Depends(get_db
                 _bg_logger.warning("Remote-Bereinigung Bulk '%s': %s", task["name"], e)
 
     threading.Thread(target=_bg, daemon=True, name="remote-cleanup-bulk").start()
-    return {"ok": True, "deleted": deleted}
+    return {"ok": True, "deleted": deleted, "skipped_chain_bases": skipped}
+
+
+def _dependent_closure(db: Session, record: BackupRecord) -> list[BackupRecord]:
+    """Every record that (directly or through others) needs `record`."""
+    seen: dict[int, BackupRecord] = {}
+    todo = [record]
+    while todo:
+        cur = todo.pop()
+        for d in backup_records.dependents(db, cur):
+            if d.id not in seen and d.id != record.id:
+                seen[d.id] = d
+                todo.append(d)
+    return sorted(seen.values(), key=lambda r: r.created_at, reverse=True)
+
+
+def _chain_conflict(db: Session, record: BackupRecord, deleting_ids: set) -> list[BackupRecord]:
+    return [d for d in _dependent_closure(db, record) if d.id not in deleting_ids]
 
 
 @router.delete("/{backup_id}")
-def delete_backup(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def delete_backup(backup_id: int, with_dependents: bool = False, db: Session = Depends(get_db),
+                  user: User = Depends(get_current_user)):
     record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
     if not record:
         raise HTTPException(404, "Backup not found")
 
+    # A full / earlier incremental that later incrementals build on can't go
+    # alone - they'd become unrestorable. Delete the dependents with it only
+    # when explicitly asked to.
+    dependents = _dependent_closure(db, record)
+    if dependents and not with_dependents:
+        raise HTTPException(409, {
+            "message": f"Diese Sicherung wird von {len(dependents)} späteren Sicherung(en) der Kette benötigt. "
+                       "Zuerst diese löschen oder die Kette ab hier komplett löschen.",
+            "dependents": [{"id": d.id, "name": d.name, "created_at": d.created_at.isoformat() + "Z",
+                            "backup_level": d.backup_level} for d in dependents],
+        })
+
     # 1. Collect remote-cleanup tasks (all DB queries happen HERE, before deletion)
     all_tasks: list[dict] = []
     members: list[BackupRecord] = []
+    for d in dependents:
+        all_tasks.append(_snapshot_remote_task(d, db, exclude_id=d.id))
     if record.backup_type == "landscape":
-        members = _find_member_records(record, db)
+        members = [m for m in _find_member_records(record, db) if not _chain_conflict(db, m, {m.id})]
         for m in members:
             all_tasks.append(_snapshot_remote_task(m, db, exclude_id=m.id))
     all_tasks.append(_snapshot_remote_task(record, db, exclude_id=record.id))
 
-    # 2. Delete local files + DB records immediately
+    # 2. Delete local files + DB records immediately (newest dependents first)
+    for d in dependents:
+        backup_engine.delete_backup(Path(d.path))
+        db.delete(d)
     for m in members:
         try:
             backup_engine.delete_backup(Path(m.path))
@@ -439,12 +493,15 @@ class LandscapeBackupPayload(BaseModel):
     storage_target_ids: Optional[list[int]] = None
     stream_volumes_target_id: Optional[int] = None
     stop_containers: bool = False
+    backup_mode: str = "full"
+    synthetic_full_every: int = 7
 
 
 def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Optional[str],
                         storage_target_ids: Optional[list[int]],
                         stream_volumes_target_id: Optional[int] = None,
-                        stop_containers: bool = False):
+                        stop_containers: bool = False, backup_mode: str = "full",
+                        synthetic_full_every: int = 0):
     db = SessionLocal()
     try:
         landscape_label = label or "Gesamte Landschaft"
@@ -468,49 +525,14 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
             stream_target=stream_target, should_cancel=lambda: job_tracker.is_cancel_requested(job_id),
             stop_containers=stop_containers, on_bytes=on_bytes, on_upload_bytes=on_upload_bytes,
             on_log=on_log,
+            **({"backup_mode": backup_mode, "synthetic_full_every": synthetic_full_every}
+               if backup_mode != "full" else {}),
         )
-        record = BackupRecord(
-            backup_type="landscape",
-            name=result.name,
-            path=str(result.path),
-            status="ok" if result.ok else "failed",
-            error=result.error,
-            size_bytes=result.size_bytes,
-            containers_json=json.dumps(result.containers),
-            streamed_target_id=result.streamed_target_id,
-        )
-        db.add(record)
-        db.commit()
-        db.refresh(record)
+        def upload_progress(label_, idx, total):
+            job_tracker.update_progress(job_id, 1, label_, 1)
 
-        # Each member container backup lives in its own directory with real
-        # data (image, volumes) - without its own record it'd be invisible in
-        # the UI, never deletable, and never subject to retention, even
-        # though it still takes up real disk space.
-        member_records = []
-        for member in result.member_results:
-            member_record = BackupRecord(
-                backup_type="container", name=member.name, path=str(member.path),
-                status="ok" if member.ok else "failed", error=member.error,
-                size_bytes=member.size_bytes, containers_json=json.dumps([member.name]),
-                streamed_target_id=member.streamed_target_id,
-            )
-            db.add(member_record)
-            member_records.append(member_record)
-        db.commit()
-
-        if result.ok:
-            def upload_progress(label_, idx, total):
-                job_tracker.update_progress(job_id, 1, label_, 1)
-
-            ok_members = [m for m in member_records if m.status == "ok" and Path(m.path).exists()]
-            sync_results, member_synced = storage_sync.sync_backup_with_members(
-                result.path, [m.path for m in ok_members], storage_target_ids,
-                stream_target=stream_target, on_progress=upload_progress)
-            record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
-            for m in ok_members:
-                m.synced_target_ids = json.dumps(member_synced.get(m.path, []))
-            db.commit()
+        record = backup_records.persist_result(db, result, "landscape", storage_target_ids,
+                                               stream_target=stream_target, on_progress=upload_progress)
 
         if result.cancelled:
             job_tracker.cancel_job(job_id)
@@ -535,11 +557,28 @@ def backup_landscape_now(payload: LandscapeBackupPayload, user: User = Depends(g
     thread = threading.Thread(
         target=_run_landscape_job,
         args=(job.id, payload.label, payload.project_filter, payload.storage_target_ids,
-              payload.stream_volumes_target_id, payload.stop_containers),
+              payload.stream_volumes_target_id, payload.stop_containers,
+              payload.backup_mode if payload.backup_mode in ("full", "incremental") else "full",
+              max(0, payload.synthetic_full_every)),
         daemon=True,
     )
     thread.start()
     return {"job_id": job.id}
+
+
+def _record_targets(db: Session, record: BackupRecord) -> list[tuple]:
+    """Every storage target that may hold this backup (streaming target first,
+    then the upload targets) - missing chain parts are fetched from these."""
+    out = []
+    ids = []
+    if record.streamed_target_id is not None:
+        ids.append(record.streamed_target_id)
+    ids += [i for i in json.loads(record.synced_target_ids or "[]") if i not in ids]
+    for tid in ids:
+        t = db.query(StorageTarget).filter(StorageTarget.id == tid, StorageTarget.enabled == True).first()  # noqa: E712
+        if t:
+            out.append((t.type, t.config_json, t.id))
+    return out
 
 
 class RestorePayload(BaseModel):
@@ -552,7 +591,8 @@ class RestorePayload(BaseModel):
 
 def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], start: bool,
                       stream_target: Optional[tuple], rename_volumes: bool = True,
-                      volume_base_dir: Optional[str] = None, overwrite: bool = False):
+                      volume_base_dir: Optional[str] = None, overwrite: bool = False,
+                      fallback_targets: Optional[list] = None):
     label = new_name or Path(backup_path).parent.name
     event_log.log_event("restore", f"Restore von '{label}' gestartet")
     # Während der Wiederherstellung ist der Container weg/gestoppt - NetPulse soll das nicht als Ausfall melden
@@ -561,9 +601,12 @@ def _run_restore_job(job_id: str, backup_path: str, new_name: Optional[str], sta
         def progress(step, name, total=None):
             job_tracker.update_progress(job_id, step, name, total)
 
+        from app.restore_engine import fetcher_for_targets
         restore_container(Path(backup_path), new_name=new_name, start=start, on_progress=progress,
                            stream_target=stream_target, rename_volumes=rename_volumes,
-                           volume_base_dir=volume_base_dir, overwrite=overwrite)
+                           volume_base_dir=volume_base_dir, overwrite=overwrite,
+                           fetch_missing=fetcher_for_targets(fallback_targets or []),
+                           on_log=lambda m: job_tracker.add_log(job_id, m))
         job_tracker.finish_job(job_id, True)
         event_log.log_event("restore", f"Restore von '{label}' erfolgreich abgeschlossen")
         netpulse.report(label, "ok", kind="restore")
@@ -590,7 +633,8 @@ def restore_backup(backup_id: int, payload: RestorePayload, db: Session = Depend
     thread = threading.Thread(
         target=_run_restore_job,
         args=(job.id, record.path, payload.new_name, payload.start, stream_target,
-              payload.rename_volumes, payload.volume_base_dir, payload.overwrite),
+              payload.rename_volumes, payload.volume_base_dir, payload.overwrite,
+              _record_targets(db, record)),
         daemon=True,
     )
     thread.start()
@@ -664,6 +708,7 @@ def landscape_members(backup_id: int, db: Session = Depends(get_db), user: User 
                         "created_at": candidate.created_at.isoformat() + "Z" if candidate else None,
                         "status": candidate.status if candidate else None,
                         "size_bytes": candidate.size_bytes if candidate else None,
+                        "backup_level": (candidate.backup_level or "full") if candidate else None,
                     })
         else:
             # Last-resort fallback: containers_json name list (old backup format or
@@ -728,3 +773,139 @@ def download_backup(backup_id: int, db: Session = Depends(get_db), user: User = 
         media_type="application/gzip",
         headers={"Content-Disposition": f'attachment; filename="{archive_name}"'},
     )
+
+
+# ---------- Incremental chains: contents, single volume restore, integrity check ----------
+
+def _get_container_record(db: Session, backup_id: int) -> BackupRecord:
+    record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
+    if not record:
+        raise HTTPException(404, "Backup not found")
+    if record.backup_type != "container":
+        raise HTTPException(400, "Nur für Container-Sicherungen")
+    return record
+
+
+@router.get("/{backup_id}/contents")
+def backup_contents(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Volumes and bind mounts of a backup (for the single-volume restore)."""
+    from app.restore_engine import list_mounts
+    record = _get_container_record(db, backup_id)
+    path = Path(record.path)
+    if not path.exists():
+        return {"volumes": [], "binds": [], "available": False,
+                "level": record.backup_level or "full"}
+    try:
+        data = list_mounts(path)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(400, f"Sicherung nicht lesbar: {exc}")
+    data["available"] = True
+    return data
+
+
+class MountRestorePayload(BaseModel):
+    kind: str  # "volume" | "bind"
+    name: str  # volume name | bind destination inside the container
+    target: Optional[str] = None  # restore into another volume / host directory
+    replace: bool = True  # empty the target first (exact point-in-time state)
+
+
+def _run_mount_restore_job(job_id: str, backup_path: str, payload: dict, stream_target, targets):
+    from app.restore_engine import fetcher_for_targets, restore_mount
+    label = f"{payload['name']} aus {Path(backup_path).parent.name}"
+    event_log.log_event("restore", f"Wiederherstellung von {label} gestartet")
+    try:
+        dest = restore_mount(
+            Path(backup_path), payload["kind"], payload["name"], target=payload.get("target") or None,
+            replace=payload.get("replace", True), stream_target=stream_target,
+            fetch_missing=fetcher_for_targets(targets),
+            on_progress=lambda step, name, total=None: job_tracker.update_progress(job_id, step, name, total),
+            on_log=lambda m: job_tracker.add_log(job_id, m))
+        job_tracker.add_log(job_id, f"Wiederhergestellt nach: {dest}")
+        job_tracker.finish_job(job_id, True)
+        event_log.log_event("restore", f"Wiederherstellung von {label} nach {dest} erfolgreich")
+    except Exception as exc:  # noqa: BLE001
+        job_tracker.finish_job(job_id, False, str(exc))
+        event_log.log_event("restore", f"Wiederherstellung von {label} fehlgeschlagen: {exc}", level="error")
+
+
+@router.post("/{backup_id}/restore-mount")
+def restore_single_mount(backup_id: int, payload: MountRestorePayload, db: Session = Depends(get_db),
+                         user: User = Depends(get_current_user)):
+    record = _get_container_record(db, backup_id)
+    if payload.kind not in ("volume", "bind"):
+        raise HTTPException(400, "kind muss 'volume' oder 'bind' sein")
+    stream_target = storage_sync.resolve_stream_target(db, record.streamed_target_id)
+    job = job_tracker.create_job("restore", f"{record.name}: {payload.name}", total_steps=3)
+    threading.Thread(target=_run_mount_restore_job,
+                     args=(job.id, record.path, payload.model_dump(), stream_target, _record_targets(db, record)),
+                     daemon=True).start()
+    return {"job_id": job.id}
+
+
+def _run_verify_job(job_id: str, backup_path: str, label: str, targets: list, restic_info: Optional[tuple]):
+    from app.restore_engine import fetcher_for_targets
+    try:
+        if restic_info:
+            report = _verify_restic(*restic_info)
+        else:
+            report = chain.verify(Path(backup_path), fetch_missing=fetcher_for_targets(targets),
+                                  on_log=lambda m: job_tracker.add_log(job_id, m))
+        for err in report["errors"][:50]:
+            job_tracker.add_log(job_id, f"FEHLER {err}")
+        summary = (f"Integritätsprüfung {label}: {'in Ordnung' if report['ok'] else 'FEHLER'} - "
+                   f"{report.get('checked_files', 0)} Dateien, {report.get('checked_archives', 0)} Archive, "
+                   f"{len(report.get('dependencies') or [])} Kettenteile")
+        job_tracker.add_log(job_id, summary)
+        job_tracker.finish_job(job_id, report["ok"], None if report["ok"] else "; ".join(report["errors"][:3]))
+        event_log.log_event("backup", summary, level="info" if report["ok"] else "error")
+    except Exception as exc:  # noqa: BLE001
+        job_tracker.finish_job(job_id, False, str(exc))
+        event_log.log_event("backup", f"Integritätsprüfung {label} fehlgeschlagen: {exc}", level="error")
+
+
+def _verify_restic(target: tuple, container_name: str, snapshot_ids: dict) -> dict:
+    target_type, config_json, _tid = target
+    repo_url, env, conf = restic_engine.repo_url_and_env(target_type, json.loads(config_json or "{}"),
+                                                         container_name)
+    try:
+        restic_engine.check_repo(repo_url, env, restic_engine.get_password())
+        missing = restic_engine.missing_snapshots(repo_url, env, restic_engine.get_password(),
+                                                  list(snapshot_ids.values()))
+    finally:
+        if conf:
+            restic_engine.rclone_backends.discard_conf(conf)
+    errors = [f"Snapshot {sid[:8]} fehlt im Repository" for sid in missing]
+    return {"ok": not errors, "errors": errors, "checked_archives": len(snapshot_ids), "checked_files": 0,
+            "dependencies": []}
+
+
+@router.post("/{backup_id}/verify")
+def verify_backup(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Integrity check: chain complete, checksums intact, every file's content
+    reproducible from the chain (restic: `restic check` + snapshots present)."""
+    record = _get_container_record(db, backup_id)
+    targets = _record_targets(db, record)
+    restic_info = None
+    path = Path(record.path)
+    if not path.exists() and not targets:
+        raise HTTPException(400, "Sicherung ist weder lokal noch auf einem Speicherziel vorhanden")
+    if not path.exists():
+        # Catalog-imported: fetch the folder first, like a restore would
+        from app.restore_engine import fetcher_for_targets
+        try:
+            fetcher_for_targets(targets)(_relative_key(path), path)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, f"Sicherung konnte nicht geladen werden: {exc}")
+    meta = chain.read_meta(path)
+    if meta.get("backup_engine") == "restic" and record.streamed_target_id is not None:
+        stream_target = storage_sync.resolve_stream_target(db, record.streamed_target_id)
+        if not stream_target:
+            raise HTTPException(400, "Das Restic-Speicherziel ist nicht mehr verfügbar")
+        restic_info = (stream_target, meta.get("container_name") or record.name,
+                       meta.get("restic_snapshot_ids") or {})
+    label = f"{record.name} ({path.name})"
+    job = job_tracker.create_job("verify", label, total_steps=1)
+    threading.Thread(target=_run_verify_job, args=(job.id, record.path, label, targets, restic_info),
+                     daemon=True).start()
+    return {"job_id": job.id}

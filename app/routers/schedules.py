@@ -26,8 +26,18 @@ class SchedulePayload(BaseModel):
     retention_days: int = 0
     storage_target_ids: list[int] = []
     stream_volumes_target_id: Optional[int] = None  # if set, volumes stream directly here instead of being written locally
+    backup_mode: str = "full"  # "full" | "incremental" (initial full, then incrementals + synthetic full)
+    synthetic_full_every: int = 7  # incremental: combine into a synthetic full after this many incrementals (0 = never)
+    keep_merged_incrementals: bool = True  # after a synthetic full: keep merged incrementals (retention decides) or delete them
     stop_containers: bool = False  # opt-in: stop container(s) before archiving, restart afterwards, for an application-consistent backup
     enabled: bool = True
+
+
+def _validate_chain(payload: "SchedulePayload"):
+    if payload.backup_mode not in ("full", "incremental"):
+        raise HTTPException(400, "backup_mode muss 'full' oder 'incremental' sein")
+    if payload.synthetic_full_every < 0 or payload.synthetic_full_every > 365:
+        raise HTTPException(400, "Synthetic Full: 0 bis 365 Inkremente")
 
 
 def _validate_cron(expr: str):
@@ -49,6 +59,8 @@ def list_schedules(db: Session = Depends(get_db), user: User = Depends(get_curre
             "storage_target_ids": json.loads(s.storage_target_ids or "[]"),
             "stream_volumes_target_id": s.stream_volumes_target_id,
             "stop_containers": s.stop_containers, "enabled": s.enabled,
+            "backup_mode": s.backup_mode or "full", "synthetic_full_every": s.synthetic_full_every,
+            "keep_merged_incrementals": s.keep_merged_incrementals,
             "last_run_at": s.last_run_at.isoformat() + "Z" if s.last_run_at else None,
             "last_status": s.last_status,
         } for s in rows
@@ -58,6 +70,7 @@ def list_schedules(db: Session = Depends(get_db), user: User = Depends(get_curre
 @router.post("")
 def create_schedule(payload: SchedulePayload, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     _validate_cron(payload.cron_expression)
+    _validate_chain(payload)
     if payload.target_type == "container" and not payload.target_ref:
         raise HTTPException(400, "target_ref (container name) is required for target_type=container")
 
@@ -79,6 +92,7 @@ def update_schedule(schedule_id: int, payload: SchedulePayload, db: Session = De
     if not sched:
         raise HTTPException(404, "Schedule not found")
     _validate_cron(payload.cron_expression)
+    _validate_chain(payload)
 
     data = payload.model_dump()
     target_ids = data.pop("storage_target_ids")

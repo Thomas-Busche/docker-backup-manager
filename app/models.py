@@ -32,6 +32,11 @@ class BackupRecord(Base):
     created_at = Column(DateTime, default=utcnow)
     synced_target_ids = Column(Text, nullable=True)  # JSON list of StorageTarget ids this version was uploaded to
     streamed_target_id = Column(Integer, nullable=True)  # set if volumes were streamed directly to this StorageTarget instead of being written locally
+    # Incremental chains (app/chain.py): "full" | "incremental" | "synthetic_full" | "restic" | NULL (classic full)
+    backup_level = Column(String(16), nullable=True)
+    chain_id = Column(String(64), nullable=True)
+    depends_json = Column(Text, nullable=True)  # JSON list of backup paths this version needs for a restore
+    data_as_of = Column(DateTime, nullable=True)  # point in time the data represents (synthetic full = its source incremental)
 
 
 class StorageTarget(Base):
@@ -64,6 +69,9 @@ class Schedule(Base):
     storage_target_ids = Column(Text, nullable=False, default="[]")  # JSON list of StorageTarget ids to sync to
     stream_volumes_target_id = Column(Integer, nullable=True)  # if set, volumes are streamed directly here instead of being written locally first (bypasses at-rest encryption for volume data)
     stop_containers = Column(Boolean, nullable=False, default=False)  # opt-in: stop the container(s) before archiving volumes/binds and restart afterwards, for an application-consistent (rather than crash-consistent) backup
+    backup_mode = Column(String(16), nullable=False, default="full")  # "full" (every run complete) | "incremental" (chain + synthetic full)
+    synthetic_full_every = Column(Integer, nullable=False, default=7)  # incremental mode: combine into a synthetic full after this many incrementals (0 = never)
+    keep_merged_incrementals = Column(Boolean, nullable=False, default=True)  # after a synthetic full: keep the merged incrementals (subject to retention) or delete them right away
     enabled = Column(Boolean, default=True)
     created_at = Column(DateTime, default=utcnow)
     last_run_at = Column(DateTime, nullable=True)
