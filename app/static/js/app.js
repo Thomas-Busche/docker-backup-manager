@@ -299,6 +299,11 @@ async function pollGlobalJobs() {
       toastedJobIds.add(job.id);
       if (job.status === "success") {
         toast(`${job.label}: erfolgreich abgeschlossen`, "ok");
+        if (job.download_url && pendingExportJobs.has(job.id)) {
+          pendingExportJobs.delete(job.id);
+          triggerDownload(job.download_url);
+        }
+        if (job.kind === "import" && state.route === "backups") navigate("backups");
       } else if (job.status === "cancelled") {
         toast(`${job.label}: abgebrochen`, "ok");
       } else {
@@ -784,10 +789,16 @@ async function containersPage() {
 async function backupsPage() {
   const data = await api("/api/backups");
   const wrap = h(`<div>
-    <div class="page-header"><h2>Backups</h2></div>
+    <div class="page-header"><h2>Backups</h2>
+      <button class="btn" id="import-backup-btn" title="Eine mit „Komplett herunterladen“ erstellte Exportdatei einspielen">⬆ Sicherung importieren</button>
+      <input type="file" id="import-backup-file" accept=".tar" style="display:none">
+    </div>
     <div id="groups"></div>
   </div>`);
   const groupsEl = wrap.querySelector("#groups");
+  const importInput = wrap.querySelector("#import-backup-file");
+  wrap.querySelector("#import-backup-btn").addEventListener("click", () => importInput.click());
+  importInput.addEventListener("change", () => { if (importInput.files[0]) importBackupFile(importInput.files[0]); importInput.value = ""; });
   const names = Object.keys(data.groups).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
   if (!names.length) {
     groupsEl.appendChild(h(`<div class="empty-state">Noch keine Backups vorhanden</div>`));
@@ -963,7 +974,7 @@ async function backupsPage() {
           ${isLsc
             ? '<button class="btn primary members-btn">🗺️ Mitglieder &amp; Restore</button><button class="btn verify-btn" title="Integrität aller Container dieser Gruppensicherung prüfen">🔍 Prüfen</button>'
             : '<button class="btn restore-btn">↩ Wiederherstellen</button><button class="btn verify-btn" title="Integrität prüfen: Kette vollständig, Prüfsummen, jede Datei wiederherstellbar">🔍 Prüfen</button>'}
-          <button class="btn download-btn">⬇ Download</button>
+          <button class="btn download-btn" title="Komplette Sicherung als eine Datei herunterladen (alle Daten inkl. Image) - lässt sich auf jedem Backup Manager importieren">⬇ Komplett herunterladen</button>
           <button class="btn danger delete-btn">Löschen</button>
         </td>
       </tr>`);
@@ -975,14 +986,7 @@ async function backupsPage() {
       const membersBtn = row.querySelector(".members-btn");
       if (membersBtn) membersBtn.addEventListener("click", () => openLandscapeMembersModal(v));
       const downloadBtn = row.querySelector(".download-btn");
-      if (downloadBtn) downloadBtn.addEventListener("click", () => {
-        const a = document.createElement("a");
-        a.href = `/api/backups/${v.id}/download`;
-        a.download = "";
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-      });
+      if (downloadBtn) downloadBtn.addEventListener("click", () => startExport(v));
       row.querySelector(".delete-btn").addEventListener("click", async (e) => {
         if (!confirm(`Backup vom ${fmtDate(v.created_at)} für "${name}" wirklich löschen?`)) return;
         const btn = e.currentTarget;
@@ -1059,6 +1063,51 @@ async function deleteBackupVersion(v) {
     await api(`/api/backups/${v.id}?with_dependents=true`, { method: "DELETE" });
     toast(`Kette gelöscht (${n + 1} Sicherungen)`);
   }
+}
+
+// ---------- complete export / import ----------
+const pendingExportJobs = new Set();
+
+function triggerDownload(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+async function startExport(v) {
+  try {
+    const res = await api(`/api/backups/${v.id}/export`, { method: "POST" });
+    pendingExportJobs.add(res.job_id);
+    toast("Export wird vorbereitet - der Download startet automatisch, sobald die Datei fertig ist");
+    pollGlobalJobs();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+async function importBackupFile(file) {
+  toast(`Lade ${file.name} hoch (${fmtBytes(file.size)}) …`);
+  try {
+    const res = await fetch(`/api/backups/import`, {
+      method: "POST", body: file, credentials: "same-origin",
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error((data && data.detail) || `Import fehlgeschlagen (${res.status})`);
+    toast("Datei hochgeladen - Import läuft");
+    pollGlobalJobs();
+  } catch (err) { toast(err.message, "error"); }
+}
+
+function describeRetention(s) {
+  const parts = [];
+  if (s.retention_chains > 0) parts.push(`${s.retention_chains} Kette${s.retention_chains === 1 ? "" : "n"}`);
+  else if (s.retention_count > 0) parts.push(`${s.retention_count} Versionen`);
+  if (s.retention_days > 0) parts.push(`max. ${s.retention_days} Tage`);
+  const gfs = [s.keep_daily && `${s.keep_daily} T`, s.keep_weekly && `${s.keep_weekly} W`, s.keep_monthly && `${s.keep_monthly} M`].filter(Boolean);
+  if (gfs.length) parts.push(`+ ${gfs.join(" / ")}`);
+  return parts.join(" · ") || "unbegrenzt";
 }
 
 async function startVerify(v) {
@@ -1388,7 +1437,7 @@ async function schedulesPage() {
         : s.name_contains ? `Name enthält: ${s.name_contains}`
         : s.project_filter ? `Projekt: ${s.project_filter}` : "Gesamte Landschaft"}</td>
       <td>${describeCron(s.cron_expression)}</td>
-      <td>${s.retention_count > 0 ? s.retention_count + " Versionen" : ""}${s.retention_days > 0 ? " / " + s.retention_days + " Tage" : ""}
+      <td>${describeRetention(s)}
           ${s.backup_mode === "incremental" ? `<div><span class="badge running" title="Inkrementell, Synthetic Full nach ${s.synthetic_full_every} Inkrementen">Inkrementell${s.synthetic_full_every ? ` · SF/${s.synthetic_full_every}` : ""}</span></div>` : ""}</td>
       <td>${targetNames.length ? targetNames.join(", ") : '<span class="muted">nur lokal</span>'}</td>
       <td>${fmtDate(s.last_run_at)}</td>
@@ -1548,8 +1597,19 @@ async function openScheduleModal(existing) {
             verschwindet erst, wenn keiner ihrer Zeitpunkte mehr behalten wird.
           </div>
         </div>
-        <div class="field"><label>Aufbewahrung: Anzahl Versionen (0 = unbegrenzt)</label><input type="text" id="s-ret-count" value="${existing ? existing.retention_count : 7}" /></div>
-        <div class="field"><label>Aufbewahrung: Tage (0 = deaktiviert)</label><input type="text" id="s-ret-days" value="${existing ? existing.retention_days : 0}" /></div>
+        <div class="section-title" style="margin:14px 0 6px;">Aufbewahrung</div>
+        <div class="field"><label>Anzahl Versionen behalten (0 = unbegrenzt)</label><input type="text" id="s-ret-count" value="${existing ? existing.retention_count : 7}" /></div>
+        <div class="field" id="s-ret-chains-field"><label>Oder: Anzahl Ketten behalten (0 = aus; ersetzt die Versionen)</label>
+          <input type="text" id="s-ret-chains" value="${existing ? (existing.retention_chains || 0) : 0}" />
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">Eine Kette = Vollbackup (bzw. Synthetic Full) plus die Inkremente danach. Beispiel: Synthetic Full nach 7, 3 Ketten behalten = die letzten 3 × (1 Voll + 7 Inkremente). Ältere Ketten werden komplett gelöscht.</div></div>
+        <div class="field"><label>Höchstalter in Tagen (0 = aus)</label><input type="text" id="s-ret-days" value="${existing ? existing.retention_days : 0}" /></div>
+        <div class="field"><label>Zusätzlich langfristig behalten (je die neueste Sicherung, 0 = aus)</label>
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
+            <label style="display:flex; align-items:center; gap:6px; font-weight:normal;">Tage <input type="text" id="s-keep-daily" style="width:70px" value="${existing ? (existing.keep_daily || 0) : 0}" /></label>
+            <label style="display:flex; align-items:center; gap:6px; font-weight:normal;">Wochen <input type="text" id="s-keep-weekly" style="width:70px" value="${existing ? (existing.keep_weekly || 0) : 0}" /></label>
+            <label style="display:flex; align-items:center; gap:6px; font-weight:normal;">Monate <input type="text" id="s-keep-monthly" style="width:70px" value="${existing ? (existing.keep_monthly || 0) : 0}" /></label>
+          </div>
+          <div class="muted" style="font-size:.75rem; margin-top:4px;">Generationenprinzip: z. B. 7 Tage, 4 Wochen, 12 Monate = je eine Sicherung der letzten 7 Tage, der letzten 4 Wochen und der letzten 12 Monate - auch über das Höchstalter hinaus. Was eine behaltene Sicherung zur Wiederherstellung braucht, bleibt immer erhalten.</div></div>
         <div class="field">
           <label>Speicherziele für diesen Zeitplan (wohin zusätzlich hochgeladen wird)</label>
           <div id="s-storage-targets">${targetsHtml}</div>
@@ -1654,6 +1714,10 @@ async function openScheduleModal(existing) {
       cron_expression: buildCronExpression(),
       retention_count: parseInt(overlay.querySelector("#s-ret-count").value || "0", 10),
       retention_days: parseInt(overlay.querySelector("#s-ret-days").value || "0", 10),
+      retention_chains: parseInt(overlay.querySelector("#s-ret-chains").value || "0", 10),
+      keep_daily: parseInt(overlay.querySelector("#s-keep-daily").value || "0", 10),
+      keep_weekly: parseInt(overlay.querySelector("#s-keep-weekly").value || "0", 10),
+      keep_monthly: parseInt(overlay.querySelector("#s-keep-monthly").value || "0", 10),
       storage_target_ids: storageTargetIds,
       stream_volumes_target_id: overlay.querySelector("#s-stream-target").value
         ? parseInt(overlay.querySelector("#s-stream-target").value, 10) : null,

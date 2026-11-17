@@ -261,3 +261,32 @@ def test_first_restic_snapshot_is_shown_as_the_initial_full():
         rows = {v["id"]: v for v in client.get("/api/backups").json()["groups"][name]}
     assert rows[ids[0]]["restic_initial"] is True and rows[ids[1]]["restic_initial"] is False
     assert rows[ids[1]]["added_bytes"] == 10
+
+
+def test_schedule_keeps_the_newest_two_chains(monkeypatch):
+    from app import scheduler
+    from app.database import SessionLocal, init_db
+    from app.models import BackupRecord, Schedule
+    init_db()
+    import app.routers.backups as backups_router
+    monkeypatch.setattr(backups_router, "_cleanup_remote_for_record", lambda r, db: None)
+    name = f"gen-{uuid.uuid4().hex[:6]}"
+    with SessionLocal() as db:
+        # 3 chains: full + 2 inc | synth + 2 inc | synth + 1 inc
+        layout = [("full", "c1"), ("incremental", "c1"), ("incremental", "c1"),
+                  ("synthetic_full", "c2"), ("incremental", "c2"), ("incremental", "c2"),
+                  ("synthetic_full", "c3"), ("incremental", "c3")]
+        ids, prev = [], {}
+        for day, (level, cid) in enumerate(layout, 1):
+            ts = f"202601{day:02d}T000000Z"
+            deps = [] if level != "incremental" else prev[cid]
+            r = _rec(db, name, ts, level, deps, chain_id=cid)
+            prev[cid] = prev.get(cid, []) + [ts] if level == "incremental" else [ts]
+            ids.append(r.id)
+        sched = Schedule(name=name, target_type="container", target_ref=name, cron_expression="0 3 * * *",
+                         retention_count=1, retention_days=0, retention_chains=2, storage_target_ids="[]")
+        db.add(sched)
+        db.commit()
+        scheduler._apply_retention(db, sched)
+        left = sorted(r.id for r in db.query(BackupRecord).filter(BackupRecord.name == name))
+    assert left == ids[3:]  # chain 1 gone completely, chains 2 and 3 complete

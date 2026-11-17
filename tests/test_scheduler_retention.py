@@ -29,8 +29,8 @@ def test_apply_retention_keeps_earlier_deletions_when_a_later_one_fails(monkeypa
 
         # Force-prune all 3, but make the second deletion raise - simulating a
         # permission error or similar mid-batch failure on a real filesystem.
-        monkeypatch.setattr(scheduler, "versions_to_prune",
-                             lambda versions, count, days: [v for v in versions if v.id in ids])
+        monkeypatch.setattr(scheduler, "versions_to_keep",
+                             lambda versions, *a, **k: {v.id for v in versions if v.id not in ids})
 
         call_order = []
 
