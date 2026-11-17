@@ -238,3 +238,26 @@ def test_group_backup_listing_shows_member_levels():
         entry = client.get("/api/backups").json()["groups"][f"grp-{tag}"][0]
     assert entry["member_levels"] == {"incremental": 1, "full": 1}
     assert entry["member_added_bytes"] is None
+
+
+def test_first_restic_snapshot_is_shown_as_the_initial_full():
+    from app.database import SessionLocal, init_db
+    from app.main import app
+    from app.reset_password import reset_password
+
+    init_db()
+    reset_password("restic-list-user", "supersecret1")
+    name = f"rst-{uuid.uuid4().hex[:6]}"
+    with SessionLocal() as db:
+        ids = []
+        for ts in ("20260101T000000Z", "20260102T000000Z"):
+            r = _rec(db, name, ts, "restic", chain_id=None)
+            r.streamed_target_id = 3
+            r.added_bytes = 1000 if ts.startswith("202601010") else 10
+            db.commit()
+            ids.append(r.id)
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "restic-list-user", "password": "supersecret1"})
+        rows = {v["id"]: v for v in client.get("/api/backups").json()["groups"][name]}
+    assert rows[ids[0]]["restic_initial"] is True and rows[ids[1]]["restic_initial"] is False
+    assert rows[ids[1]]["added_bytes"] == 10

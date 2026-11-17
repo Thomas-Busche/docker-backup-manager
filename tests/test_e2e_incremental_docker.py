@@ -221,6 +221,7 @@ def test_incremental_mode_on_a_restic_target(env, tmp_path):
     first = results[0][0]
     assert first.added_bytes and first.added_bytes > 1_000_000  # image + data went in the first time
     assert again.size_bytes == results[-1][0].size_bytes
+    assert first.size_bytes > first.added_bytes  # size includes the image now (uncompressed)
     assert again.added_bytes < 50_000, (again.added_bytes, first.added_bytes)
     assert chain.read_meta(again.path)["restic_added_bytes"] == again.added_bytes
     meta = chain.read_meta(results[-1][0].path)

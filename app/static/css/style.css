@@ -411,6 +411,7 @@ td.cell-actions .btn { white-space: nowrap; }
 .chain-node.chain-incremental { border-left-color: var(--warn); }
 .chain-node.chain-synthetic_full { border-left-color: var(--ok); }
 .chain-node.chain-restic { border-left-color: var(--accent); }
+.chain-node.chain-restic_full { border-left-color: var(--text-dim); }
 .chain-node.chain-focus { box-shadow: 0 0 0 2px var(--accent); }
 .chain-node.chain-needed { box-shadow: 0 0 0 2px var(--warn); transform: translateY(-2px); }
 .chain-node-title { font-weight: 600; font-size: .82rem; }
