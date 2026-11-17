@@ -843,22 +843,41 @@ def restore_single_mount(backup_id: int, payload: MountRestorePayload, db: Sessi
     return {"job_id": job.id}
 
 
-def _run_verify_job(job_id: str, backup_path: str, label: str, targets: list, restic_info: Optional[tuple]):
+def _verify_one(job_id: str, backup_path: str, targets: list, restic_info: Optional[tuple]) -> dict:
     from app.restore_engine import fetcher_for_targets
+    if restic_info:
+        return _verify_restic(*restic_info)
+    return chain.verify(Path(backup_path), fetch_missing=fetcher_for_targets(targets),
+                        on_log=lambda m: job_tracker.add_log(job_id, m))
+
+
+def _run_verify_job(job_id: str, label: str, specs: list):
+    """specs: [(member_label, backup_path, targets, restic_info)] - one entry for
+    a container backup, one per member for a group backup."""
     try:
-        if restic_info:
-            report = _verify_restic(*restic_info)
-        else:
-            report = chain.verify(Path(backup_path), fetch_missing=fetcher_for_targets(targets),
-                                  on_log=lambda m: job_tracker.add_log(job_id, m))
-        for err in report["errors"][:50]:
-            job_tracker.add_log(job_id, f"FEHLER {err}")
-        summary = (f"Integritätsprüfung {label}: {'in Ordnung' if report['ok'] else 'FEHLER'} - "
-                   f"{report.get('checked_files', 0)} Dateien, {report.get('checked_archives', 0)} Archive, "
-                   f"{len(report.get('dependencies') or [])} Kettenteile")
+        all_ok, errors, files, archives, deps = True, [], 0, 0, 0
+        for i, (part_label, backup_path, targets, restic_info) in enumerate(specs, 1):
+            job_tracker.update_progress(job_id, i, part_label, len(specs))
+            try:
+                report = _verify_one(job_id, backup_path, targets, restic_info)
+            except Exception as exc:  # noqa: BLE001
+                report = {"ok": False, "errors": [str(exc)]}
+            prefix = f"{part_label}: " if len(specs) > 1 else ""
+            for err in report["errors"][:50]:
+                job_tracker.add_log(job_id, f"FEHLER {prefix}{err}")
+            if len(specs) > 1:
+                job_tracker.add_log(job_id, f"{part_label}: {'in Ordnung' if report['ok'] else 'FEHLER'}")
+            all_ok = all_ok and report["ok"]
+            errors += [prefix + e for e in report["errors"]]
+            files += report.get("checked_files", 0)
+            archives += report.get("checked_archives", 0)
+            deps += len(report.get("dependencies") or [])
+        summary = (f"Integritätsprüfung {label}: {'in Ordnung' if all_ok else 'FEHLER'} - "
+                   + (f"{len(specs)} Container, " if len(specs) > 1 else "")
+                   + f"{files} Dateien, {archives} Archive, {deps} Kettenteile")
         job_tracker.add_log(job_id, summary)
-        job_tracker.finish_job(job_id, report["ok"], None if report["ok"] else "; ".join(report["errors"][:3]))
-        event_log.log_event("backup", summary, level="info" if report["ok"] else "error")
+        job_tracker.finish_job(job_id, all_ok, None if all_ok else "; ".join(errors[:3]))
+        event_log.log_event("backup", summary, level="info" if all_ok else "error")
     except Exception as exc:  # noqa: BLE001
         job_tracker.finish_job(job_id, False, str(exc))
         event_log.log_event("backup", f"Integritätsprüfung {label} fehlgeschlagen: {exc}", level="error")
@@ -880,23 +899,20 @@ def _verify_restic(target: tuple, container_name: str, snapshot_ids: dict) -> di
             "dependencies": []}
 
 
-@router.post("/{backup_id}/verify")
-def verify_backup(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Integrity check: chain complete, checksums intact, every file's content
-    reproducible from the chain (restic: `restic check` + snapshots present)."""
-    record = _get_container_record(db, backup_id)
+def _verify_spec(db: Session, record: BackupRecord) -> tuple:
+    """(label, path, targets, restic_info) for one container backup; fetches a
+    catalog-imported folder from its storage target first."""
     targets = _record_targets(db, record)
     restic_info = None
     path = Path(record.path)
     if not path.exists() and not targets:
-        raise HTTPException(400, "Sicherung ist weder lokal noch auf einem Speicherziel vorhanden")
+        raise HTTPException(400, f"Sicherung {record.name} ist weder lokal noch auf einem Speicherziel vorhanden")
     if not path.exists():
-        # Catalog-imported: fetch the folder first, like a restore would
         from app.restore_engine import fetcher_for_targets
         try:
             fetcher_for_targets(targets)(_relative_key(path), path)
         except Exception as exc:  # noqa: BLE001
-            raise HTTPException(400, f"Sicherung konnte nicht geladen werden: {exc}")
+            raise HTTPException(400, f"Sicherung {record.name} konnte nicht geladen werden: {exc}")
     meta = chain.read_meta(path)
     if meta.get("backup_engine") == "restic" and record.streamed_target_id is not None:
         stream_target = storage_sync.resolve_stream_target(db, record.streamed_target_id)
@@ -904,8 +920,27 @@ def verify_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
             raise HTTPException(400, "Das Restic-Speicherziel ist nicht mehr verfügbar")
         restic_info = (stream_target, meta.get("container_name") or record.name,
                        meta.get("restic_snapshot_ids") or {})
-    label = f"{record.name} ({path.name})"
-    job = job_tracker.create_job("verify", label, total_steps=1)
-    threading.Thread(target=_run_verify_job, args=(job.id, record.path, label, targets, restic_info),
-                     daemon=True).start()
+    return record.name, record.path, targets, restic_info
+
+
+@router.post("/{backup_id}/verify")
+def verify_backup(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Integrity check: chain complete, checksums intact, every file's content
+    reproducible from the chain (restic: `restic check` + snapshots present).
+    For a group backup every member container is checked."""
+    record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
+    if not record:
+        raise HTTPException(404, "Backup not found")
+    if record.backup_type == "landscape":
+        members = _find_member_records(record, db)
+        if not members:
+            raise HTTPException(400, "Zu dieser Gruppensicherung wurden keine Container-Sicherungen gefunden")
+        specs = [_verify_spec(db, m) for m in members]
+    elif record.backup_type == "container":
+        specs = [_verify_spec(db, record)]
+    else:
+        raise HTTPException(400, "Für diese Sicherung nicht verfügbar")
+    label = f"{record.name} ({Path(record.path).name})"
+    job = job_tracker.create_job("verify", label, total_steps=len(specs))
+    threading.Thread(target=_run_verify_job, args=(job.id, label, specs), daemon=True).start()
     return {"job_id": job.id}

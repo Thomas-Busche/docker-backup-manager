@@ -829,7 +829,8 @@ async function backupsPage() {
     const groups = {};
     if (isLandscape) {
       const members = [...new Set(versions.flatMap((v) => v.member_names || []))].sort();
-      members.forEach((m) => { if ((data.groups[m] || []).some((v) => v.chain_id)) groups[m] = data.groups[m]; });
+      // Always reachable for a group (also in full mode - then each backup is shown on its own)
+      members.forEach((m) => { if ((data.groups[m] || []).length) groups[m] = data.groups[m]; });
     } else if (versions.some((v) => v.chain_id)) {
       groups[name] = versions;
     }
@@ -960,7 +961,7 @@ async function backupsPage() {
         <td><span class="badge ${v.status === "ok" ? "ok" : "failed"}">${v.status}</span></td>
         <td style="display:flex; gap:8px;">
           ${isLsc
-            ? '<button class="btn primary members-btn">🗺️ Mitglieder &amp; Restore</button>'
+            ? '<button class="btn primary members-btn">🗺️ Mitglieder &amp; Restore</button><button class="btn verify-btn" title="Integrität aller Container dieser Gruppensicherung prüfen">🔍 Prüfen</button>'
             : '<button class="btn restore-btn">↩ Wiederherstellen</button><button class="btn verify-btn" title="Integrität prüfen: Kette vollständig, Prüfsummen, jede Datei wiederherstellbar">🔍 Prüfen</button>'}
           <button class="btn download-btn">⬇ Download</button>
           <button class="btn danger delete-btn">Löschen</button>
@@ -1097,6 +1098,9 @@ function openChainModal(name, groups) {
         <div class="chain-legend">
           <span class="badge neutral">Voll</span><span class="badge running">Inkrementell</span><span class="badge ok">Synthetic Full</span>
         </div>
+        ${sections.some((sec) => sec.ordered.some((v) => v.chain_id)) ? "" : `<div class="chain-merge" style="margin-bottom:10px;">
+          Diese Sicherungen sind alle Vollbackups. Für Ketten im Zeitplan unter „Backup-Art" <strong>Inkrementell mit Synthetic Full</strong> wählen.
+        </div>`}
         <div class="chain-list">${chainsHtml || '<div class="empty-state">Keine Container-Sicherungen</div>'}</div>
         <div class="row-actions"><button class="btn" id="close-btn">Schließen</button></div>
       </div>
