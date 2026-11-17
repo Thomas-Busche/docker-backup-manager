@@ -785,7 +785,10 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
 
             encryption.encrypt_directory_in_place(backup_dir, on_progress=encrypt_progress)
 
-        size = restic_data_bytes if use_restic else dir_size_bytes(backup_dir)
+        # Restic in incremental mode also holds the image - count it like the
+        # classic modes do, otherwise "neu" (image incl.) exceeds the size shown
+        size = (restic_data_bytes + (image_size if "__image__" in restic_snapshot_ids else 0)
+                if use_restic else dir_size_bytes(backup_dir))
         _log(f"Backup abgeschlossen ({fmtbytes(size)})")
         if use_restic:
             _log(f"Neu im Restic-Repository (nach Deduplizierung): {fmtbytes(restic_stats.get('added', 0))}")

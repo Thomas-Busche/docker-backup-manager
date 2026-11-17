@@ -1009,7 +1009,12 @@ async function backupsPage() {
   return wrap;
 }
 
-const LEVEL_LABELS = { full: "Voll", incremental: "Inkrementell", synthetic_full: "Synthetic Full", restic: "Inkrementell (Restic)" };
+const LEVEL_LABELS = { full: "Voll", incremental: "Inkrementell", synthetic_full: "Synthetic Full", restic: "Inkrementell (Restic)", restic_full: "Voll (Restic)" };
+
+// Display level: the first restic snapshot of a container is its initial full upload
+function displayLevel(v) {
+  return v.restic_initial ? "restic_full" : (v.backup_level || "full");
+}
 
 // Restic: what a run really added to the repository (the size is the protected data)
 function addedHint(added) {
@@ -1022,21 +1027,22 @@ function groupLevelBadge(v) {
   const levels = v.member_levels || {};
   const kinds = Object.keys(levels);
   if (!kinds.length) return '<span class="badge neutral">Gruppe</span>';
-  const main = ["incremental", "restic", "synthetic_full", "full"].find((k) => levels[k]) || kinds[0];
+  const main = ["incremental", "restic", "synthetic_full", "full", "restic_full"].find((k) => levels[k]) || kinds[0];
   const cls = { full: "neutral", incremental: "running", synthetic_full: "ok", restic: "running" }[main] || "neutral";
   const title = kinds.map((k) => `${levels[k]}× ${LEVEL_LABELS[k] || k}`).join(", ");
   return `<span class="badge ${cls}" title="Container-Sicherungen dieser Gruppe: ${escHtml(title)}">Gruppe · ${escHtml(LEVEL_LABELS[main] || main)}</span>`;
 }
 
 function levelBadge(v) {
-  const level = v.backup_level || "full";
+  const level = displayLevel(v);
   const deps = (v.depends_on_ids || []).length;
   const cls = { full: "neutral", incremental: "running", synthetic_full: "ok", restic: "running" }[level] || "neutral";
   const missing = (v.missing_dependencies || []).length;
   let title = level === "incremental" ? `Braucht ${deps} ältere Sicherung(en) der Kette` : "Eigenständig wiederherstellbar";
   if (level === "synthetic_full" && v.data_as_of) title += ` · Datenstand ${fmtDateLong(v.data_as_of)}`;
   if (v.dependents_count) title += ` · Basis für ${v.dependents_count} spätere Sicherung(en)`;
-  if (level === "restic") title = "Restic: dedupliziert, jeder Snapshot ist ein vollständiger Stand";
+  if (level === "restic") title = "Restic: dedupliziert, jeder Snapshot ist ein vollständiger Stand - gespeichert werden nur Änderungen";
+  if (level === "restic_full") title = "Restic: erste Sicherung in dieses Repository - alle Daten inkl. Image";
   return `<span class="badge ${missing ? "failed" : cls}" title="${escAttr(title)}">${LEVEL_LABELS[level] || level}${missing ? " ⚠" : ""}</span>`;
 }
 
@@ -1078,7 +1084,7 @@ function openChainModal(name, groups) {
     return { container, ordered, chains };
   });
   const nodeHtml = (v, idx) => {
-    const level = v.backup_level || "full";
+    const level = displayLevel(v);
     const label = level === "incremental" ? `Inkrementell ${idx}` : (LEVEL_LABELS[level] || level);
     const asOf = level === "synthetic_full" && v.data_as_of ? `<div class="chain-node-sub">Stand ${fmtDate(v.data_as_of)}</div>` : "";
     return `<div class="chain-node chain-${level}" data-id="${v.id}" tabindex="0">
