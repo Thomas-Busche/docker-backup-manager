@@ -79,11 +79,13 @@ def list_backups(db: Session = Depends(get_db), user: User = Depends(get_current
             "depends_on_ids": [id_by_path[d] for d in backup_records.depends_paths(r) if d in id_by_path],
             "missing_dependencies": [d for d in backup_records.depends_paths(r) if d not in id_by_path],
             "dependents_count": dependents_count.get(r.id, 0),
+            "added_bytes": r.added_bytes,
         }
         if r.backup_type == "landscape":
             member_names, member_size = _landscape_member_info(r, records_by_path, records_latest_by_name)
             entry["member_names"] = member_names
             entry["member_size_bytes"] = member_size
+            entry["member_levels"], entry["member_added_bytes"] = _landscape_member_levels(r, records_by_path)
         grouped.setdefault(r.name, []).append(entry)
 
     targets = db.query(StorageTarget).all()
@@ -154,6 +156,21 @@ def _landscape_member_info(
             if mem_rec:
                 size += mem_rec.size_bytes or 0
     return names, size
+
+
+def _landscape_member_levels(record: BackupRecord, records_by_path: dict) -> tuple[dict, Optional[int]]:
+    """({level: count}, restic bytes added) of a group backup's member backups
+    (full / incremental / synthetic_full / restic), so the list shows whether
+    a run was incremental and what it really added to a restic repository."""
+    levels: dict[str, int] = {}
+    added = None
+    for d in _read_member_jsons(Path(record.path)):
+        mem_rec = records_by_path.get(d.get("backup_path", ""))
+        level = (mem_rec.backup_level if mem_rec is not None else None) or d.get("backup_level") or "full"
+        levels[level] = levels.get(level, 0) + 1
+        if mem_rec is not None and mem_rec.added_bytes is not None:
+            added = (added or 0) + mem_rec.added_bytes
+    return levels, added
 
 
 import logging as _logging

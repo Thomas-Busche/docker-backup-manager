@@ -215,6 +215,14 @@ def test_incremental_mode_on_a_restic_target(env, tmp_path):
         r = backup_engine.backup_container(name, BACKUPS_DIR, stream_target=target, backup_mode="incremental")
         assert r.ok, r.error
         results.append((r, _fp_volume(client, vol)))
+    # a run without any change adds (almost) nothing - the size shown is the protected data
+    again = backup_engine.backup_container(name, BACKUPS_DIR, stream_target=target, backup_mode="incremental")
+    assert again.ok, again.error
+    first = results[0][0]
+    assert first.added_bytes and first.added_bytes > 1_000_000  # image + data went in the first time
+    assert again.size_bytes == results[-1][0].size_bytes
+    assert again.added_bytes < 50_000, (again.added_bytes, first.added_bytes)
+    assert chain.read_meta(again.path)["restic_added_bytes"] == again.added_bytes
     meta = chain.read_meta(results[-1][0].path)
     assert meta["backup_engine"] == "restic" and meta["backup_level"] == "restic"
     assert "__image__" in meta["restic_snapshot_ids"]

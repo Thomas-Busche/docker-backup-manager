@@ -841,8 +841,8 @@ async function backupsPage() {
     // For landscapes, sum the member_size_bytes across versions (the landscape
     // record itself is just a tiny metadata file — the real data is in the members)
     const totalSize = isLandscape
-      ? versions.reduce((s, v) => s + (v.member_size_bytes || v.size_bytes || 0), 0)
-      : versions.reduce((s, v) => s + (v.size_bytes || 0), 0);
+      ? versions.reduce((s, v) => s + (v.member_added_bytes ?? (v.member_size_bytes || v.size_bytes || 0)), 0)
+      : versions.reduce((s, v) => s + (v.added_bytes ?? (v.size_bytes || 0)), 0);
     const icon = isLandscape ? "🗺️" : "📦";
 
     // Collect all target IDs used across versions of this group for the header
@@ -955,8 +955,8 @@ async function backupsPage() {
       const row = h(`<tr>
         <td style="width:36px; padding-right:0; vertical-align:middle;"><input type="checkbox" class="row-cb" data-id="${v.id}" style="width:auto; margin:0; cursor:pointer;"></td>
         <td>${fmtDate(v.created_at)}</td>
-        <td>${isLsc ? '<span class="badge neutral">Gruppe</span>' : levelBadge(v)}</td>
-        <td>${fmtBytes(displaySize)}</td>
+        <td>${isLsc ? groupLevelBadge(v) : levelBadge(v)}</td>
+        <td>${fmtBytes(displaySize)}${addedHint(isLsc ? v.member_added_bytes : v.added_bytes)}</td>
         <td>${targetBadges(v.synced_target_ids, v.streamed_target_id)}</td>
         <td><span class="badge ${v.status === "ok" ? "ok" : "failed"}">${v.status}</span></td>
         <td style="display:flex; gap:8px;">
@@ -1011,6 +1011,23 @@ async function backupsPage() {
 
 const LEVEL_LABELS = { full: "Voll", incremental: "Inkrementell", synthetic_full: "Synthetic Full", restic: "Inkrementell (Restic)" };
 
+// Restic: what a run really added to the repository (the size is the protected data)
+function addedHint(added) {
+  if (added == null) return "";
+  return `<div class="muted" style="font-size:.72rem;" title="Restic speichert nur neue Datenblöcke - so viel hat diese Sicherung tatsächlich neu belegt">neu: ${fmtBytes(added)}</div>`;
+}
+
+// Group backup: what its member backups were (a run of an incremental schedule = "Gruppe · Inkrementell")
+function groupLevelBadge(v) {
+  const levels = v.member_levels || {};
+  const kinds = Object.keys(levels);
+  if (!kinds.length) return '<span class="badge neutral">Gruppe</span>';
+  const main = ["incremental", "restic", "synthetic_full", "full"].find((k) => levels[k]) || kinds[0];
+  const cls = { full: "neutral", incremental: "running", synthetic_full: "ok", restic: "running" }[main] || "neutral";
+  const title = kinds.map((k) => `${levels[k]}× ${LEVEL_LABELS[k] || k}`).join(", ");
+  return `<span class="badge ${cls}" title="Container-Sicherungen dieser Gruppe: ${escHtml(title)}">Gruppe · ${escHtml(LEVEL_LABELS[main] || main)}</span>`;
+}
+
 function levelBadge(v) {
   const level = v.backup_level || "full";
   const deps = (v.depends_on_ids || []).length;
@@ -1054,7 +1071,7 @@ function openChainModal(name, groups) {
     const chains = [];
     const byChain = {};
     ordered.forEach((v) => {
-      const key = v.chain_id || `single-${v.id}`;
+      const key = v.chain_id || (v.backup_level === "restic" ? `restic-${v.streamed_target_id}` : `single-${v.id}`);
       if (!byChain[key]) { byChain[key] = []; chains.push({ key, items: byChain[key] }); }
       byChain[key].push(v);
     });
@@ -1067,7 +1084,7 @@ function openChainModal(name, groups) {
     return `<div class="chain-node chain-${level}" data-id="${v.id}" tabindex="0">
       <div class="chain-node-title">${escHtml(label)}</div>
       <div class="chain-node-sub">${fmtDate(v.created_at)}</div>${asOf}
-      <div class="chain-node-sub">${fmtBytes(v.size_bytes || 0)}${(v.depends_on_ids || []).length ? ` · braucht ${(v.depends_on_ids || []).length}` : ""}</div>
+      <div class="chain-node-sub">${fmtBytes(v.size_bytes || 0)}${v.added_bytes != null ? ` · neu ${fmtBytes(v.added_bytes)}` : ""}${(v.depends_on_ids || []).length ? ` · braucht ${(v.depends_on_ids || []).length}` : ""}</div>
       <div class="chain-node-actions">
         <button class="btn chain-restore" title="Diesen Zeitpunkt wiederherstellen">↩</button>
         <button class="btn chain-verify" title="Integrität prüfen">🔍</button>
@@ -1077,11 +1094,13 @@ function openChainModal(name, groups) {
   const chainsHtml = sections.map(({ container, chains }) => `${multi ? `<div class="chain-container-title">📦 ${escHtml(container)}</div>` : ""}` + chains.map((c, ci) => {
     const first = c.items[0];
     const isChain = first.chain_id;
+    const isRestic = first.backup_level === "restic";
     let incIdx = 0;
     const nodes = c.items.map((v) => nodeHtml(v, (v.backup_level === "incremental") ? ++incIdx : 0)).join('<div class="chain-arrow">→</div>');
     const synthHint = first.backup_level === "synthetic_full" ? '<div class="chain-merge">⇒ im Backup-Speicher aus der vorherigen Kette zusammengeführt</div>' : "";
     return `<div class="chain-row">
-      <div class="chain-row-head">${isChain ? `Kette ${ci + 1}` : "Einzelne Sicherung"} <span class="muted">(${c.items.length} Sicherung${c.items.length === 1 ? "" : "en"}, ${fmtBytes(c.items.reduce((s, v) => s + (v.size_bytes || 0), 0))})</span></div>
+      <div class="chain-row-head">${isChain ? `Kette ${ci + 1}` : isRestic ? "Restic-Repository (dedupliziert)" : "Einzelne Sicherung"} <span class="muted">(${c.items.length} Sicherung${c.items.length === 1 ? "" : "en"}, ${fmtBytes(c.items.reduce((s, v) => s + (v.added_bytes ?? (v.size_bytes || 0)), 0))}${isRestic ? " belegt" : ""})</span></div>
+      ${isRestic ? '<div class="chain-merge">Jeder Restic-Snapshot ist ein vollständiger Stand und einzeln wiederherstellbar. Restic speichert dabei nur neue Datenblöcke - unveränderte Daten belegen keinen Platz erneut.</div>' : ""}
       ${synthHint}
       <div class="chain-flow">${nodes}</div>
     </div>`;
@@ -1098,7 +1117,7 @@ function openChainModal(name, groups) {
         <div class="chain-legend">
           <span class="badge neutral">Voll</span><span class="badge running">Inkrementell</span><span class="badge ok">Synthetic Full</span>
         </div>
-        ${sections.some((sec) => sec.ordered.some((v) => v.chain_id)) ? "" : `<div class="chain-merge" style="margin-bottom:10px;">
+        ${sections.some((sec) => sec.ordered.some((v) => v.chain_id || v.backup_level === "restic")) ? "" : `<div class="chain-merge" style="margin-bottom:10px;">
           Diese Sicherungen sind alle Vollbackups. Für Ketten im Zeitplan unter „Backup-Art" <strong>Inkrementell mit Synthetic Full</strong> wählen.
         </div>`}
         <div class="chain-list">${chainsHtml || '<div class="empty-state">Keine Container-Sicherungen</div>'}</div>

@@ -366,6 +366,7 @@ def backup_volume_from_stream(
     should_cancel=None,
     on_upload_bytes: Optional[Callable] = None,
     on_log: Optional[Callable] = None,
+    stats: Optional[dict] = None,
 ) -> tuple[str, int]:
     """
     Streamt einen unkomprimierten Tar eines Volumes in ein Restic-Repo.
@@ -514,6 +515,10 @@ def backup_volume_from_stream(
                 sid = data.get("snapshot_id", "")
                 if sid:
                     logger.info("Restic-Snapshot %s erstellt (tag=%s)", sid[:8], tag)
+                    if stats is not None:
+                        # What this snapshot really added to the repo after dedup (+compression)
+                        stats["added"] = stats.get("added", 0) + int(
+                            data.get("data_added_packed", data.get("data_added", 0)) or 0)
                     # total_bytes_processed = full uncompressed source size read by restic.
                     # This reflects the actual data volume being protected, not just the
                     # incremental delta (data_added_packed), which shrinks to near-zero for

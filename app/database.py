@@ -77,7 +77,8 @@ def _add_missing_columns():
             if "streamed_target_id" not in existing:
                 conn.execute(text("ALTER TABLE backup_records ADD COLUMN streamed_target_id INTEGER"))
             for col, ddl in (("backup_level", "VARCHAR(16)"), ("chain_id", "VARCHAR(64)"),
-                             ("depends_json", "TEXT"), ("data_as_of", "DATETIME")):
+                             ("depends_json", "TEXT"), ("data_as_of", "DATETIME"),
+                             ("added_bytes", "BIGINT")):
                 if col not in existing:
                     conn.execute(text(f"ALTER TABLE backup_records ADD COLUMN {col} {ddl}"))
 
