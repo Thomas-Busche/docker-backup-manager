@@ -64,3 +64,45 @@ def test_cleanup_waits_for_a_running_backup_on_the_same_repo(tmp_path):
     lock.release()
     t.join(5)
     assert order == ["backup done", "cleanup"]
+
+
+def test_leftover_lock_of_a_previous_repo_is_removed(tmp_path):
+    """Old repo deleted only partly (its lock survived), new repo created in
+    the same folder -> "unable to create lock in backend: ciphertext
+    verification failed" on every backup, until the foreign lock is gone."""
+    import shutil
+    import subprocess
+    repo = tmp_path / "repo"
+    restic_engine.init_repo_if_needed(str(repo), {}, "pw")
+    old_locks = tmp_path / "old_locks"
+    p = subprocess.Popen(["restic", "-r", str(repo), "backup", "--stdin"], stdin=subprocess.PIPE,
+                         env={**os.environ, "RESTIC_PASSWORD": "pw"},
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(50):
+        if any((repo / "locks").iterdir()):
+            break
+        time.sleep(0.1)
+    p.kill()
+    p.wait()
+    shutil.copytree(repo / "locks", old_locks)
+    shutil.rmtree(repo)
+    restic_engine.init_repo_if_needed(str(repo), {}, "pw")  # fresh repo, new master key
+    for f in old_locks.iterdir():
+        shutil.copy(f, repo / "locks" / f.name)
+    with pytest.raises(RuntimeError, match="ciphertext verification failed"):
+        restic_engine.backup_volume_from_stream(_chunks(4), str(repo), {}, "pw", "c/vol")
+    logs = []
+    restic_engine.init_repo_if_needed(str(repo), {}, "pw", on_log=logs.append)  # what the next backup does first
+    assert any("Sperrdateien" in m for m in logs)
+    sid, _n = restic_engine.backup_volume_from_stream(_chunks(4), str(repo), {}, "pw", "c/vol")
+    assert sid
+
+
+def test_leftovers_of_a_partly_deleted_repo_are_cleared_before_init(tmp_path):
+    repo = tmp_path / "repo"
+    restic_engine.init_repo_if_needed(str(repo), {}, "pw")
+    restic_engine.backup_volume_from_stream(_chunks(4), str(repo), {}, "pw", "c/vol")
+    (repo / "config").unlink()  # purge cut off: config gone, snapshots/data/keys still there
+    restic_engine.init_repo_if_needed(str(repo), {}, "pw")
+    sid, _n = restic_engine.backup_volume_from_stream(_chunks(4), str(repo), {}, "pw", "c/vol")
+    assert sid and restic_engine.snapshot_count(str(repo), {}, "pw") == 1

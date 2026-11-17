@@ -203,6 +203,12 @@ def _snapshot_remote_task(record: BackupRecord, db: Session, exclude_id: int = N
 
     stream = None
     is_last = False
+    if record.streamed_target_id is not None and record.backup_type == "landscape":
+        # A group backup's own folder (_landscapes/<name>/<ts>: meta + member
+        # list) is uploaded to the streaming target too - remove it from there
+        t = db.query(StorageTarget).filter(StorageTarget.id == record.streamed_target_id).first()
+        if t and not any(s["name"] == t.name and s["type"] == t.type for s in synced):
+            synced.append({"type": t.type, "config_json": t.config_json, "name": t.name})
     if record.streamed_target_id is not None and record.backup_type == "container":
         t = db.query(StorageTarget).filter(StorageTarget.id == record.streamed_target_id).first()
         if t:
@@ -272,6 +278,11 @@ def _run_remote_cleanup(task: dict) -> list[str]:
             _bg_logger.info("Lösche synced-Kopie auf '%s': %s", t["name"], rel_key)
             storage_sync.delete_from_target(t["type"], t["config_json"], rel_key)
             _bg_logger.info("Synced-Kopie gelöscht: %s auf '%s'", rel_key, t["name"])
+            # Leave no empty <name>/ (and _landscapes/) folders behind
+            parent = rel_key.rsplit("/", 1)[0] if "/" in rel_key else ""
+            while parent:
+                storage_sync.try_rmdir_on_target(t["type"], t["config_json"], parent)
+                parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
         except Exception as exc:
             _bg_logger.warning("Fehler beim Löschen von '%s' auf '%s': %s", rel_key, t["name"], exc)
             errors.append(f"{t['name']}: {exc}")
