@@ -339,6 +339,17 @@ def snapshot_count(repo_url: str, env: dict, password: str) -> Optional[int]:
         return None
 
 
+def _repo_missing(returncode: int, stderr: str) -> bool:
+    """True when restic says there is no repo config at the location. restic
+    >= 0.17 uses exit code 10; older versions exit with 1, so the message is
+    checked too. Network/auth errors don't match and never cause a delete."""
+    if returncode == _RESTIC_EXIT_NO_REPO:
+        return True
+    s = (stderr or "").lower()
+    return ("unable to open config file" in s or "repository does not exist" in s
+            or "is there a repository at the following location" in s)
+
+
 def init_repo_if_needed(repo_url: str, env: dict, password: str,
                          on_log: Optional[Callable] = None) -> None:
     """Initialisiert das Restic-Repo wenn es noch nicht existiert."""
@@ -366,7 +377,7 @@ def init_repo_if_needed(repo_url: str, env: dict, password: str,
         # add the current password as an extra key, using the old one.
         _add_current_password_as_key(repo_url, env, password, _log)
         return
-    if result.returncode == _RESTIC_EXIT_NO_REPO:
+    if _repo_missing(result.returncode, stderr):
         # No config file = no usable repo. Whatever is still in the folder
         # (an earlier repo deleted only partly) would break the new one:
         # foreign locks/snapshots fail with "ciphertext verification failed".

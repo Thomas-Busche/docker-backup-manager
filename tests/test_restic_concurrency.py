@@ -106,3 +106,13 @@ def test_leftovers_of_a_partly_deleted_repo_are_cleared_before_init(tmp_path):
     restic_engine.init_repo_if_needed(str(repo), {}, "pw")
     sid, _n = restic_engine.backup_volume_from_stream(_chunks(4), str(repo), {}, "pw", "c/vol")
     assert sid and restic_engine.snapshot_count(str(repo), {}, "pw") == 1
+
+
+def test_missing_repo_is_detected_on_old_and_new_restic():
+    from app.restic_engine import _repo_missing
+    old = ("Fatal: unable to open config file: Stat: stat /r/config: no such file or directory\n"
+           "Is there a repository at the following location?\n/r")
+    assert _repo_missing(1, old)
+    assert _repo_missing(10, "")
+    assert not _repo_missing(1, "Fatal: unable to open repository: connection refused")
+    assert not _repo_missing(12, "Fatal: wrong password or no key found")
