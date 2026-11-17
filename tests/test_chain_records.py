@@ -162,3 +162,51 @@ def test_schedule_api_stores_chain_settings():
         assert (s["backup_mode"], s["synthetic_full_every"], s["keep_merged_incrementals"]) == ("incremental", 5, False)
         bad = dict(body, name=body["name"] + "b", backup_mode="differential")
         assert client.post("/api/schedules", json=bad).status_code == 400
+
+
+def test_verify_a_group_backup_checks_every_member(monkeypatch):
+    import time
+    from app import chain, job_tracker
+    from app.config import BACKUPS_DIR
+    from app.database import SessionLocal, init_db
+    from app.main import app
+    from app.models import BackupRecord
+    from app.reset_password import reset_password
+
+    init_db()
+    reset_password("chain-verify-user", "supersecret1")
+    tag = uuid.uuid4().hex[:6]
+    checked = []
+
+    def fake_verify(path, fetch_missing=None, on_log=None, **kw):
+        checked.append(Path(path).parent.name)
+        ok = not Path(path).parent.name.startswith("bad")
+        return {"ok": ok, "errors": [] if ok else ["Prüfsumme falsch"], "checked_files": 3,
+                "checked_archives": 1, "dependencies": []}
+
+    monkeypatch.setattr(chain, "verify", fake_verify)
+    with SessionLocal() as db:
+        lsc_dir = BACKUPS_DIR / f"grp-{tag}" / "20260101T000000Z"
+        lsc_dir.mkdir(parents=True)
+        lsc = BackupRecord(backup_type="landscape", name=f"grp-{tag}", path=str(lsc_dir), status="ok",
+                           containers_json=json.dumps([f"web-{tag}", f"bad-{tag}"]),
+                           created_at=datetime.datetime(2026, 1, 1))
+        db.add(lsc)
+        db.commit()
+        _rec(db, f"web-{tag}", "20260101T000010Z", "full")
+        _rec(db, f"bad-{tag}", "20260101T000020Z", "full")
+        lsc_id = lsc.id
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "chain-verify-user", "password": "supersecret1"})
+        resp = client.post(f"/api/backups/{lsc_id}/verify")
+        assert resp.status_code == 200, resp.text
+        job_id = resp.json()["job_id"]
+        for _ in range(100):
+            job = job_tracker.get_job(job_id)
+            if job.status not in ("running", "pending"):
+                break
+            time.sleep(0.05)
+    assert sorted(checked) == sorted([f"web-{tag}", f"bad-{tag}"])
+    assert job.status == "failed"
+    logs = " ".join(entry["msg"] for entry in job_tracker.get_logs(job_id))
+    assert f"bad-{tag}: FEHLER" in logs and f"web-{tag}: in Ordnung" in logs and "2 Container" in logs
