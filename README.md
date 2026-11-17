@@ -35,6 +35,7 @@ Das Tool spricht ausschließlich mit der **Docker Engine API** (über den Docker
   - [Einzelnen Container wiederherstellen](#einzelnen-container-wiederherstellen)
   - [Gruppe wiederherstellen (Landscape)](#gruppe-wiederherstellen-landscape)
   - [Auf einem anderen Host wiederherstellen](#auf-einem-anderen-host-wiederherstellen)
+- [Komplett herunterladen & importieren](#komplett-herunterladen--importieren)
 - [Speicherziele (Offsite-Kopien)](#speicherziele-offsite-kopien)
   - [SMB / CIFS (Windows-Freigabe / NAS)](#smb--cifs-windows-freigabe--nas)
   - [Lokaler / gemounteter Pfad](#lokaler--gemounteter-pfad)
@@ -330,9 +331,18 @@ Unter **Zeitpläne** lassen sich automatische Backups einrichten:
 | **Streaming** | Volume-Streaming für diesen Zeitplan aktivieren |
 | **Container stoppen** | Anwendungskonsistentes Backup durch kurzes Stoppen |
 | **Versionen behalten** | Anzahl neueste Versionen, die behalten werden (0 = unbegrenzt) |
-| **Alter (Tage)** | Versionen älter als X Tage werden gelöscht (0 = deaktiviert) |
+| **Ketten behalten** | Statt Versionen: die neuesten X Ketten komplett behalten (0 = aus), siehe unten |
+| **Höchstalter (Tage)** | Versionen älter als X Tage werden gelöscht (0 = deaktiviert) |
+| **Langfristig: Tage / Wochen / Monate** | Zusätzlich je die neueste Sicherung der letzten X Tage, Wochen und Monate behalten (0 = aus) |
 
 **Zeitzone:** Zeitpläne laufen standardmäßig in UTC. Ohne `DBM_TZ` läuft ein für 03:00 Uhr geplantes Backup tatsächlich um 03:00 UTC (in Deutschland 1–2 Stunden später). `DBM_TZ=Europe/Berlin` in der `docker-compose.yml` setzen und Container neu starten.
+
+**Aufbewahrung im Detail:** Nach jedem Lauf eines Zeitplans prüft die App, welche Versionen bleiben:
+
+1. **Grundregel:** die neuesten *X Versionen* – oder, wenn **Ketten behalten** gesetzt ist, die neuesten *X Ketten* komplett. Eine Kette ist ein Vollbackup (bzw. Synthetic Full) plus alle Inkremente danach. Beispiel: „Synthetic Full nach 7 Inkrementen“ und „3 Ketten behalten“ = immer die letzten 3 × (1 Voll + 7 Inkremente); die vierte, älteste Kette wird komplett gelöscht, sobald die neue beginnt. Bei Restic-Zielen und im Modus „Jedes Mal Vollbackup“ ist jede Sicherung eigenständig, eine Kette entspricht dort einer Version.
+2. **Höchstalter:** Von der Grundregel bleiben nur Versionen, die jünger als *X Tage* sind.
+3. **Langfristig (Generationenprinzip):** Zusätzlich bleibt je die neueste Sicherung der letzten *X Tage*, *X Wochen* und *X Monate* – auch wenn sie älter als das Höchstalter ist. Beispiel: 7 / 4 / 12 = eine Sicherung pro Tag der letzten Woche, eine pro Woche des letzten Monats und eine pro Monat des letzten Jahres.
+4. **Immer:** Die neueste Sicherung bleibt, und alles, was eine behaltene Sicherung zur Wiederherstellung braucht (Vollbackup und ältere Inkremente ihrer Kette), wird nie gelöscht – auch nicht von Hand, ohne die Kette ab dort ausdrücklich mitzulöschen.
 
 **Aufbewahrung:** Werden beim Prüfen der Aufbewahrungsregel Versionen gelöscht, werden automatisch auch die Offsite-Kopien auf allen Speicherzielen entfernt. Bei Landscape-Backups werden auch die Mitglieds-Container-Backups mit bereinigt.
 
@@ -417,6 +427,20 @@ Landscape-Backups ermöglichen zwei Modi:
 1. Backup-Ordner (z. B. per `rclone copy`, SMB-Download oder S3-Sync) auf den Zielhost übertragen.
 2. In die `/data/backups`-Verzeichnisstruktur des neuen Hosts einfügen.
 3. In der UI unter **Backups** die Version auswählen und wiederherstellen.
+
+---
+
+## Komplett herunterladen & importieren
+
+**„⬇ Komplett herunterladen“** an jeder Sicherung erzeugt **eine einzige Datei** (`…dbm-export.tar`) mit dem vollständigen Stand dieses Zeitpunkts: Image, Konfiguration, Netzwerke, alle Volumes und Bind-Mounts – bei Gruppen-Backups für alle Container der Gruppe. Das klappt für jede Art von Sicherung: Vollbackup, ein Zeitpunkt mitten in einer inkrementellen Kette, Synthetic Full, auf ein Speicherziel gestreamt oder in einem Restic-Repository. Die App setzt den Stand dafür zusammen (holt fehlende Teile vom Speicherziel bzw. aus Restic) und startet den Download automatisch, sobald die Datei fertig ist. Fortschritt und Protokoll stehen im Job-Fenster. Die Datei bleibt 24 Stunden zum Herunterladen liegen.
+
+Damit lässt sich eine Sicherung z. B. auf eine externe Festplatte legen oder auf ein ganz anderes System umziehen – ohne Speicherziel und ohne Restic.
+
+**„⬆ Sicherung importieren“** oben auf der Backups-Seite spielt eine solche Datei auf jedem Docker Backup Manager wieder ein. Sie erscheint danach als normales Vollbackup (bzw. Gruppen-Backup) in der Liste und lässt sich wie gewohnt wiederherstellen – ganz, als Gruppe, einzelnes Volume oder einzelner Bind-Mount.
+
+- **Verschlüsselung:** Ist `DBM_ENCRYPTION_KEY` gesetzt, ist auch die Exportdatei verschlüsselt (Datei für Datei, wie jedes Backup). Zum Importieren muss auf dem Zielsystem derselbe Schlüssel gesetzt sein. Ohne Schlüssel ist die Datei unverschlüsselt – entsprechend sicher aufbewahren.
+- **Platzbedarf:** Beim Export und Import braucht die App vorübergehend Platz in der Größe der Sicherung im Backup-Verzeichnis (`/data/backups/.tmp`).
+- **Format:** ein normales `tar`-Archiv mit `dbm-export.json` (Inhaltsverzeichnis) und je Container einem Ordner im üblichen Backup-Format (`container.json`, `image.tar`, `volumes/*.tar.gz`, `binds/*`). Unverschlüsselt lässt es sich notfalls auch ohne die App mit `tar` auspacken.
 
 ---
 

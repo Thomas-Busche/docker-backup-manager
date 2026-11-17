@@ -35,6 +35,7 @@ class Job:
     status: str = "running"  # running | success | failed | cancelling | cancelled
     error: Optional[str] = None
     result_backup_id: Optional[int] = None
+    download_url: Optional[str] = None  # export jobs: where the finished file can be fetched
     started_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
     cancel_requested: bool = False
@@ -76,6 +77,7 @@ class Job:
             "eta_seconds": eta_seconds,
             "error": self.error,
             "result_backup_id": self.result_backup_id,
+            "download_url": self.download_url,
             "cancellable": self.status == "running" and not self.cancel_requested,
             "bytes_done": self.bytes_done,
             "speed_bytes_per_sec": speed_bytes_per_sec,

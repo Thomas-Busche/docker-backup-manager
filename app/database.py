@@ -69,6 +69,9 @@ def _add_missing_columns():
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN synthetic_full_every INTEGER NOT NULL DEFAULT 7"))
             if "keep_merged_incrementals" not in existing:
                 conn.execute(text("ALTER TABLE schedules ADD COLUMN keep_merged_incrementals BOOLEAN NOT NULL DEFAULT 1"))
+            for col in ("retention_chains", "keep_daily", "keep_weekly", "keep_monthly"):
+                if col not in existing:
+                    conn.execute(text(f"ALTER TABLE schedules ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0"))
 
         if "backup_records" in tables:
             existing = {col["name"] for col in inspector.get_columns("backup_records")}

@@ -6,8 +6,8 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -203,6 +203,12 @@ def _snapshot_remote_task(record: BackupRecord, db: Session, exclude_id: int = N
 
     stream = None
     is_last = False
+    if record.streamed_target_id is not None and record.backup_type == "landscape":
+        # A group backup's own folder (_landscapes/<name>/<ts>: meta + member
+        # list) is uploaded to the streaming target too - remove it from there
+        t = db.query(StorageTarget).filter(StorageTarget.id == record.streamed_target_id).first()
+        if t and not any(s["name"] == t.name and s["type"] == t.type for s in synced):
+            synced.append({"type": t.type, "config_json": t.config_json, "name": t.name})
     if record.streamed_target_id is not None and record.backup_type == "container":
         t = db.query(StorageTarget).filter(StorageTarget.id == record.streamed_target_id).first()
         if t:
@@ -272,6 +278,11 @@ def _run_remote_cleanup(task: dict) -> list[str]:
             _bg_logger.info("Lösche synced-Kopie auf '%s': %s", t["name"], rel_key)
             storage_sync.delete_from_target(t["type"], t["config_json"], rel_key)
             _bg_logger.info("Synced-Kopie gelöscht: %s auf '%s'", rel_key, t["name"])
+            # Leave no empty <name>/ (and _landscapes/) folders behind
+            parent = rel_key.rsplit("/", 1)[0] if "/" in rel_key else ""
+            while parent:
+                storage_sync.try_rmdir_on_target(t["type"], t["config_json"], parent)
+                parent = parent.rsplit("/", 1)[0] if "/" in parent else ""
         except Exception as exc:
             _bg_logger.warning("Fehler beim Löschen von '%s' auf '%s': %s", rel_key, t["name"], exc)
             errors.append(f"{t['name']}: {exc}")
@@ -974,4 +985,117 @@ def verify_backup(backup_id: int, db: Session = Depends(get_db), user: User = De
     label = f"{record.name} ({Path(record.path).name})"
     job = job_tracker.create_job("verify", label, total_steps=len(specs))
     threading.Thread(target=_run_verify_job, args=(job.id, label, specs), daemon=True).start()
+    return {"job_id": job.id}
+
+
+# ---------- Complete export / import (app/export_import.py) ----------
+
+def _export_item(db: Session, record: BackupRecord) -> dict:
+    from app.restore_engine import fetcher_for_targets
+    targets = _record_targets(db, record)
+    stream_target = storage_sync.resolve_stream_target(db, record.streamed_target_id) or (targets[0] if targets else None)
+    return {"record_path": record.path, "stream_target": stream_target,
+            "fetch_missing": fetcher_for_targets(targets)}
+
+
+def _run_export_job(job_id: str, items: list, landscape: Optional[dict], label: str, filename: str):
+    from app import export_import
+    out = export_import.exports_dir() / f"{job_id}.tar"
+    try:
+        export_import.cleanup_old_exports()
+        export_import.build_export(
+            items, out, landscape=landscape, on_log=lambda m: job_tracker.add_log(job_id, m),
+            on_progress=lambda step, name, total: job_tracker.update_progress(job_id, step, name, total))
+        (export_import.exports_dir() / f"{job_id}.name").write_text(filename)
+        job = job_tracker.get_job(job_id)
+        if job:
+            job.download_url = f"/api/backups/exports/{job_id}"
+        job_tracker.finish_job(job_id, True)
+        event_log.log_event("backup", f"Export {label} erstellt ({out.stat().st_size} Bytes)")
+    except Exception as exc:  # noqa: BLE001
+        out.unlink(missing_ok=True)
+        _bg_logger.exception("Export %s fehlgeschlagen", label)
+        job_tracker.finish_job(job_id, False, str(exc))
+        event_log.log_event("backup", f"Export {label} fehlgeschlagen: {exc}", level="error")
+
+
+@router.post("/{backup_id}/export")
+def export_backup(backup_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Builds a complete, self-contained export file of this backup point
+    (all data incl. image - also for chains, restic and group backups)."""
+    record = db.query(BackupRecord).filter(BackupRecord.id == backup_id).first()
+    if not record:
+        raise HTTPException(404, "Backup nicht gefunden")
+    landscape = None
+    if record.backup_type == "landscape":
+        members = _find_member_records(record, db)
+        if not members:
+            raise HTTPException(400, "Zu dieser Gruppensicherung wurden keine Container-Sicherungen gefunden")
+        items = [_export_item(db, m) for m in members]
+        landscape = {"path": record.path, "name": record.name}
+    else:
+        items = [_export_item(db, record)]
+    safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in record.name)
+    filename = f"{safe}_{Path(record.path).name}.dbm-export.tar"
+    label = f"{record.name} ({Path(record.path).name})"
+    job = job_tracker.create_job("export", f"Export {label}", total_steps=len(items) + 2)
+    threading.Thread(target=_run_export_job, args=(job.id, items, landscape, label, filename), daemon=True).start()
+    return {"job_id": job.id}
+
+
+@router.get("/exports/{job_id}")
+def download_export(job_id: str, user: User = Depends(get_current_user)):
+    from app import export_import
+    if not job_id.replace("-", "").isalnum():
+        raise HTTPException(400, "Ungültige Export-ID")
+    f = export_import.exports_dir() / f"{job_id}.tar"
+    if not f.exists():
+        raise HTTPException(404, "Export nicht (mehr) vorhanden - bitte neu erstellen")
+    name_file = export_import.exports_dir() / f"{job_id}.name"
+    filename = name_file.read_text() if name_file.exists() else f.name
+    return FileResponse(f, filename=filename, media_type="application/x-tar")
+
+
+def _run_import_job(job_id: str, upload: Path):
+    from app import export_import
+    db = SessionLocal()
+    try:
+        job_tracker.update_progress(job_id, 1, "Importiere Sicherung", 2)
+        created = export_import.import_export(upload, db, on_log=lambda m: job_tracker.add_log(job_id, m))
+        main = created[-1]
+        job_tracker.finish_job(job_id, True, result_backup_id=main.id)
+        event_log.log_event("backup", f"Sicherung {main.name} importiert ({len(created)} Einträge)")
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        job_tracker.finish_job(job_id, False, str(exc))
+        event_log.log_event("backup", f"Import fehlgeschlagen: {exc}", level="error")
+    finally:
+        db.close()
+        upload.unlink(missing_ok=True)
+
+
+@router.post("/import")
+async def import_backup(request: Request, user: User = Depends(get_current_user)):
+    """Body = an export file (raw bytes, no multipart: files of many GB are
+    streamed straight to disk next to the backups)."""
+    import uuid as _uuid
+    from app import export_import
+    upload = export_import.exports_dir() / f"upload-{_uuid.uuid4().hex}.tar"
+    size = 0
+    try:
+        with open(upload, "wb") as f:
+            async for chunk in request.stream():
+                f.write(chunk)
+                size += len(chunk)
+        if not size:
+            raise HTTPException(400, "Leere Datei")
+        try:
+            export_import.read_manifest(upload)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(400, str(exc))
+    except BaseException:
+        upload.unlink(missing_ok=True)
+        raise
+    job = job_tracker.create_job("import", "Import einer Sicherung", total_steps=2)
+    threading.Thread(target=_run_import_job, args=(job.id, upload), daemon=True).start()
     return {"job_id": job.id}

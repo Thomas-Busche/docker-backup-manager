@@ -263,6 +263,7 @@ def _start_upload_monitor(on_upload_bytes: Callable, stop_event: threading.Event
 # ---------------------------------------------------------------------------
 
 _RESTIC_EXIT_WRONG_PASSWORD = 12
+_RESTIC_EXIT_NO_REPO = 10  # restic >= 0.17: "repository does not exist" (no config file)
 
 
 def _previous_passwords(current: str) -> list[str]:
@@ -338,6 +339,17 @@ def snapshot_count(repo_url: str, env: dict, password: str) -> Optional[int]:
         return None
 
 
+def _repo_missing(returncode: int, stderr: str) -> bool:
+    """True when restic says there is no repo config at the location. restic
+    >= 0.17 uses exit code 10; older versions exit with 1, so the message is
+    checked too. Network/auth errors don't match and never cause a delete."""
+    if returncode == _RESTIC_EXIT_NO_REPO:
+        return True
+    s = (stderr or "").lower()
+    return ("unable to open config file" in s or "repository does not exist" in s
+            or "is there a repository at the following location" in s)
+
+
 def init_repo_if_needed(repo_url: str, env: dict, password: str,
                          on_log: Optional[Callable] = None) -> None:
     """Initialisiert das Restic-Repo wenn es noch nicht existiert."""
@@ -354,6 +366,7 @@ def init_repo_if_needed(repo_url: str, env: dict, password: str,
     )
     if result.returncode == 0:
         _log("Repo vorhanden, verwende vorhandenes Repo (inkrementell)")
+        _clear_foreign_locks(repo_url, env, password, _log)
         return
     stderr = result.stderr.decode(errors="replace") if isinstance(result.stderr, bytes) else str(result.stderr or "")
     if result.returncode == _RESTIC_EXIT_WRONG_PASSWORD or "wrong password" in stderr:
@@ -364,6 +377,14 @@ def init_repo_if_needed(repo_url: str, env: dict, password: str,
         # add the current password as an extra key, using the old one.
         _add_current_password_as_key(repo_url, env, password, _log)
         return
+    if _repo_missing(result.returncode, stderr):
+        # No config file = no usable repo. Whatever is still in the folder
+        # (an earlier repo deleted only partly) would break the new one:
+        # foreign locks/snapshots fail with "ciphertext verification failed".
+        try:
+            _delete_repo_folder(repo_url, env)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Reste im Repo-Ordner %s nicht gelöscht: %s", repo_url, exc)
     _log("Repo nicht gefunden, lege neues Repo an …")
     result = subprocess.run(
         [RESTIC_BIN, "-r", repo_url, "init"],
@@ -377,6 +398,27 @@ def init_repo_if_needed(repo_url: str, env: dict, password: str,
         raise RuntimeError(f"restic init fehlgeschlagen: {err}")
     logger.info("Restic-Repo angelegt: %s", repo_url)
     _log("Neues Restic-Repo angelegt")
+    _clear_foreign_locks(repo_url, env, password, _log)
+
+
+def _clear_foreign_locks(repo_url: str, env: dict, password: str, _log) -> None:
+    """Removes lock files restic can't decrypt. They are left over when a repo
+    folder was deleted only partly (an aborted cleanup over SMB) and a new repo
+    was created in the same place: every backup then fails with "unable to
+    create lock in backend: ciphertext verification failed". Called while this
+    app holds repo_lock(), so no backup/forget of ours is running on the repo."""
+    probe = subprocess.run([RESTIC_BIN, "-r", repo_url, "list", "keys"],
+                           capture_output=True, env=_full_env(env, password), timeout=120)
+    err = probe.stderr.decode(errors="replace") if isinstance(probe.stderr, bytes) else str(probe.stderr or "")
+    if probe.returncode == 0 or "ciphertext verification failed" not in err or "lock" not in err:
+        return
+    _log("Repo enthält unlesbare Sperrdateien (Reste eines früheren Repos) - werden entfernt")
+    result = subprocess.run([RESTIC_BIN, "-r", repo_url, "unlock", "--remove-all"],
+                            capture_output=True, env=_full_env(env, password), timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError("Unlesbare Sperrdateien konnten nicht entfernt werden: "
+                           + result.stderr.decode(errors="replace").strip())
+    logger.warning("Fremde Sperrdateien in %s entfernt", repo_url)
 
 
 # Seconds without any stdout output before the restic process is considered
@@ -594,7 +636,9 @@ def _delete_repo_folder(repo_url: str, env: dict) -> None:
             ["rclone", "purge", rclone_target],
             capture_output=True,
             env={**os.environ, **env},
-            timeout=120,
+            # A repo of several GB over SMB has thousands of pack files - with
+            # 2 minutes the purge was cut off halfway and left a broken folder
+            timeout=3600,
         )
         if result.returncode != 0:
             stderr = result.stderr.decode(errors="replace").strip()

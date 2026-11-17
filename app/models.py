@@ -67,6 +67,12 @@ class Schedule(Base):
     cron_expression = Column(String(64), nullable=False)  # standard 5-field cron
     retention_count = Column(Integer, default=7)
     retention_days = Column(Integer, default=0)
+    # Extended retention (app/retention.versions_to_keep): whole chains, and
+    # long-term history - newest backup per day / week / month
+    retention_chains = Column(Integer, nullable=False, default=0)
+    keep_daily = Column(Integer, nullable=False, default=0)
+    keep_weekly = Column(Integer, nullable=False, default=0)
+    keep_monthly = Column(Integer, nullable=False, default=0)
     storage_target_ids = Column(Text, nullable=False, default="[]")  # JSON list of StorageTarget ids to sync to
     stream_volumes_target_id = Column(Integer, nullable=True)  # if set, volumes are streamed directly here instead of being written locally first (bypasses at-rest encryption for volume data)
     stop_containers = Column(Boolean, nullable=False, default=False)  # opt-in: stop the container(s) before archiving volumes/binds and restart afterwards, for an application-consistent (rather than crash-consistent) backup

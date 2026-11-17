@@ -5,7 +5,7 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.8.0"
 GITHUB_REPO = "Sirbuschi2003/docker-backup-manager"
 
 import pytz

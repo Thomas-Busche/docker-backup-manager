@@ -24,6 +24,10 @@ class SchedulePayload(BaseModel):
     cron_expression: str
     retention_count: int = 7
     retention_days: int = 0
+    retention_chains: int = 0  # keep the newest N chains completely (replaces retention_count)
+    keep_daily: int = 0  # plus the newest backup of each of the last N days ...
+    keep_weekly: int = 0  # ... ISO weeks ...
+    keep_monthly: int = 0  # ... and months
     storage_target_ids: list[int] = []
     stream_volumes_target_id: Optional[int] = None  # if set, volumes stream directly here instead of being written locally
     backup_mode: str = "full"  # "full" | "incremental" (initial full, then incrementals + synthetic full)
@@ -38,6 +42,9 @@ def _validate_chain(payload: "SchedulePayload"):
         raise HTTPException(400, "backup_mode muss 'full' oder 'incremental' sein")
     if payload.synthetic_full_every < 0 or payload.synthetic_full_every > 365:
         raise HTTPException(400, "Synthetic Full: 0 bis 365 Inkremente")
+    for field in ("retention_count", "retention_days", "retention_chains", "keep_daily", "keep_weekly", "keep_monthly"):
+        if not 0 <= getattr(payload, field) <= 100000:
+            raise HTTPException(400, f"{field}: Wert muss 0 oder größer sein")
 
 
 def _validate_cron(expr: str):
@@ -56,6 +63,8 @@ def list_schedules(db: Session = Depends(get_db), user: User = Depends(get_curre
             "project_filter": s.project_filter, "name_contains": s.name_contains, "exclude_names": s.exclude_names,
             "cron_expression": s.cron_expression, "retention_count": s.retention_count,
             "retention_days": s.retention_days,
+            "retention_chains": s.retention_chains or 0, "keep_daily": s.keep_daily or 0,
+            "keep_weekly": s.keep_weekly or 0, "keep_monthly": s.keep_monthly or 0,
             "storage_target_ids": json.loads(s.storage_target_ids or "[]"),
             "stream_volumes_target_id": s.stream_volumes_target_id,
             "stop_containers": s.stop_containers, "enabled": s.enabled,

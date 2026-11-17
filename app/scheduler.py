@@ -13,7 +13,9 @@ from app import backup_engine, backup_records, event_log, job_tracker, netpulse,
 from app.config import BACKUPS_DIR, TZ_NAME
 from app.database import SessionLocal
 from app.models import BackupRecord, Schedule
-from app.retention import VersionInfo, versions_to_prune
+from app.retention import PolicyVersion, versions_to_keep
+
+CHAIN_LEVELS = ("full", "incremental", "synthetic_full")
 
 logger = logging.getLogger("dbm.scheduler")
 
@@ -123,8 +125,12 @@ def _apply_retention(db, sched: Schedule):
     if sched.target_type == "container" and sched.target_ref:
         records = db.query(BackupRecord).filter(BackupRecord.name == sched.target_ref).all()
 
-    versions = [VersionInfo(id=r.id, created_at=r.created_at) for r in records]
-    prune_ids = {v.id for v in versions_to_prune(versions, sched.retention_count, sched.retention_days)}
+    keys = _chain_keys(db, records)
+    versions = [PolicyVersion(id=r.id, created_at=r.created_at, chain_key=keys[r.id]) for r in records]
+    keep = versions_to_keep(versions, sched.retention_count or 0, sched.retention_days or 0,
+                            getattr(sched, "retention_chains", 0) or 0, getattr(sched, "keep_daily", 0) or 0,
+                            getattr(sched, "keep_weekly", 0) or 0, getattr(sched, "keep_monthly", 0) or 0)
+    prune_ids = {r.id for r in records} - keep
     prune_ids = _protect_chain_dependencies(db, records, prune_ids)
     if not prune_ids:
         return
@@ -168,6 +174,34 @@ def _apply_retention(db, sched: Schedule):
         except Exception:  # noqa: BLE001
             logger.exception("Retention: failed to prune backup %s (id=%s)", r.path, r.id)
             db.rollback()
+
+
+def _chain_keys(db, records: list) -> dict:
+    """Which chain each version belongs to (for "keep N chains").
+    Container backups: their chain id; a self-contained one (full mode,
+    restic) is a chain of its own. Group backups: a new chain begins with a
+    run whose members were backed up in full, or after a run that created a
+    synthetic full."""
+    keys: dict = {}
+    current = None
+    synth_before = False
+    for r in sorted(records, key=lambda r: r.created_at):
+        if r.backup_type != "landscape":
+            keys[r.id] = r.chain_id if r.chain_id and r.backup_level in CHAIN_LEVELS else f"single-{r.id}"
+            continue
+        from app.routers.backups import _read_member_jsons
+        members = _read_member_jsons(Path(r.path)) if Path(r.path).exists() else []
+        levels = []
+        for d in members:
+            m = db.query(BackupRecord).filter(BackupRecord.path == d.get("backup_path", "")).first()
+            levels.append((m.backup_level if m else None) or d.get("backup_level") or "full")
+        starts = (current is None or synth_before or not levels
+                  or any(lv not in ("incremental",) for lv in levels))
+        if starts:
+            current = f"l-{r.id}"
+        keys[r.id] = current
+        synth_before = any(d.get("synthetic_path") for d in members)
+    return keys
 
 
 def _chain_kwargs(sched: Schedule) -> dict:
