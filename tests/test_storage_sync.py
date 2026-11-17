@@ -23,7 +23,7 @@ def test_sync_local_path_copies_tree(tmp_path: Path):
     assert json.loads(copied.read_text()) == {"ok": True}
 
 
-def test_sync_local_path_overwrites_existing_version(tmp_path: Path):
+def test_sync_local_path_overwrites_existing_files_in_version(tmp_path: Path):
     backup_dir = BACKUPS_DIR / "app2" / "v1"
     backup_dir.mkdir(parents=True, exist_ok=True)
     (backup_dir / "f.txt").write_text("new")
@@ -32,12 +32,30 @@ def test_sync_local_path_overwrites_existing_version(tmp_path: Path):
     old_dest = dest_root / "app2" / "v1"
     old_dest.mkdir(parents=True)
     (old_dest / "f.txt").write_text("old")
-    (old_dest / "stale.txt").write_text("stale")
 
     sync_local_path(backup_dir, {"path": str(dest_root)})
 
     assert (old_dest / "f.txt").read_text() == "new"
-    assert not (old_dest / "stale.txt").exists()
+
+
+def test_sync_local_path_keeps_files_streamed_there_earlier(tmp_path: Path):
+    # A streamed backup writes image.tar straight to the target; the local
+    # version folder only holds the metadata. Syncing the metadata afterwards
+    # must not wipe the image (it used to: restore then failed with
+    # "No such file or directory: .../image.tar").
+    backup_dir = BACKUPS_DIR / "app3" / "20240101T000000Z"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    (backup_dir / "meta.json").write_text("{}")
+
+    dest_root = tmp_path / "remote3"
+    remote_version = dest_root / "app3" / "20240101T000000Z"
+    stream_upload_to_target("local_path", json.dumps({"path": str(dest_root)}),
+                            "app3/20240101T000000Z/image.tar", iter([b"image"]))
+
+    sync_local_path(backup_dir, {"path": str(dest_root)})
+
+    assert (remote_version / "image.tar").read_bytes() == b"image"
+    assert (remote_version / "meta.json").exists()
 
 
 def test_check_target_connection_local_path_write_check(tmp_path: Path):

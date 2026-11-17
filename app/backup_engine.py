@@ -265,6 +265,53 @@ def stream_volume_to_target(volume_name: str, target_type: str, config_json: str
                                                                   on_bytes=on_bytes))
 
 
+def _bind_source_is_file(client, source: str) -> bool:
+    """Whether a bind-mount source on the Docker HOST is a single file.
+
+    The source path is a host path - when DBM runs in a container it usually
+    does not exist in our own filesystem, so Path(source).is_file() would be
+    False for every single-file bind mount (e.g. a ./config.yml mounted into
+    the app). Restoring such a backup elsewhere then recreated the file as a
+    directory and the container failed to read its config. Only the Docker
+    daemon can see the host path, so ask a tiny helper container instead."""
+    local = Path(source)
+    if local.exists():
+        return local.is_file()
+    try:
+        _ensure_helper_image(client)
+        out = client.containers.run(
+            DOCKER_HELPER_IMAGE,
+            command=["sh", "-c", "if [ -d /data ]; then echo dir; else echo file; fi"],
+            volumes={source: {"bind": "/data", "mode": "ro"}},
+            remove=True,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Konnte Typ des Bind-Mounts '%s' nicht bestimmen: %s", source, exc)
+        return False
+    if isinstance(out, (bytes, str)):
+        text = out.decode(errors="replace") if isinstance(out, bytes) else out
+        return text.strip() == "file"
+    return False
+
+
+def _volume_info(client, volume_name: str) -> dict:
+    """Driver, labels and options of a named volume, so a restore on another
+    host recreates it the same way (e.g. the com.docker.compose.* labels that
+    let `docker compose up` adopt the restored volume instead of warning that
+    it "was not created by Docker Compose")."""
+    try:
+        attrs = client.volumes.get(volume_name).attrs
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(attrs, dict):
+        return {}
+    info = {"Driver": attrs.get("Driver") if isinstance(attrs.get("Driver"), str) else "local"}
+    for key in ("Labels", "Options"):
+        if isinstance(attrs.get(key), dict) and attrs[key]:
+            info[key] = attrs[key]
+    return info
+
+
 def _ensure_helper_image(client) -> None:
     """Zieht das Helper-Image wenn es lokal nicht vorhanden ist."""
     try:
@@ -479,12 +526,16 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
 
         volumes_dir = backup_dir / "volumes"
         volume_names = []
+        volume_info = {}
         restic_data_bytes: int = 0
         for mount in volume_mounts:
             vol_name = mount["Name"]
             step += 1
             _check_cancel(should_cancel, f"before volume {vol_name}")
             volume_names.append(vol_name)
+            info = _volume_info(client, vol_name)
+            if info:
+                volume_info[vol_name] = info
             vol_filename = f"{sanitize_name(vol_name)}.tar.gz"
 
             if use_restic:
@@ -524,7 +575,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
                 "destination": destination,
                 "filename": bind_filename,
                 "rw": mount.get("RW", True),
-                "is_file": Path(source).is_file(),
+                "is_file": _bind_source_is_file(client, source),
             })
 
             if use_restic:
@@ -578,6 +629,7 @@ def _backup_container(container_id_or_name: str, dest_root: Path = BACKUPS_DIR,
             "container_name": name,
             "image": image_tag,
             "volumes": volume_names,
+            "volume_info": volume_info,
             "bind_mounts": bind_mounts_meta,
             "created_at": utcnow().isoformat() + "Z",
             "docker_api_version": client.version().get("ApiVersion"),

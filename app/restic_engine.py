@@ -28,6 +28,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -261,6 +262,53 @@ def _start_upload_monitor(on_upload_bytes: Callable, stop_event: threading.Event
 # Core restic operations
 # ---------------------------------------------------------------------------
 
+_RESTIC_EXIT_WRONG_PASSWORD = 12
+
+
+def _previous_passwords(current: str) -> list[str]:
+    """Passwords this install may have used for restic repos before."""
+    candidates = [os.environ.get("DBM_RESTIC_PASSWORD", "")]
+    pw_path = BASE_DIR / ".restic_password"
+    if pw_path.exists():
+        candidates.append(pw_path.read_text().strip())
+    seen, result = {current}, []
+    for c in candidates:
+        if c and c not in seen:
+            seen.add(c)
+            result.append(c)
+    return result
+
+
+def _add_current_password_as_key(repo_url: str, env: dict, password: str, _log) -> None:
+    for old in _previous_passwords(password):
+        check = subprocess.run([RESTIC_BIN, "-r", repo_url, "cat", "config", "--no-lock"],
+                               capture_output=True, env=_full_env(env, old), timeout=60)
+        if check.returncode != 0:
+            continue
+        fd, pw_file = tempfile.mkstemp(prefix="dbm-restic-pw-")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(password)
+            add = subprocess.run([RESTIC_BIN, "-r", repo_url, "key", "add", "--new-password-file", pw_file],
+                                 capture_output=True, env=_full_env(env, old), timeout=120)
+        finally:
+            try:
+                os.unlink(pw_file)
+            except OSError:
+                pass
+        if add.returncode != 0:
+            err = add.stderr.decode(errors="replace").strip()
+            raise RuntimeError(f"restic key add fehlgeschlagen: {err}")
+        logger.info("Aktuelles Passwort als zusätzlicher Schlüssel zu %s hinzugefügt", repo_url)
+        _log("Repo mit früherem Passwort geöffnet, aktuelles Passwort als Schlüssel ergänzt")
+        return
+    raise RuntimeError(
+        "Restic-Repo existiert, lässt sich aber mit dem aktuellen Passwort nicht öffnen "
+        "(DBM_ENCRYPTION_KEY / DBM_RESTIC_PASSWORD geändert?). Früheren Schlüssel wieder setzen "
+        "oder als DBM_RESTIC_PASSWORD hinterlegen."
+    )
+
+
 def init_repo_if_needed(repo_url: str, env: dict, password: str,
                          on_log: Optional[Callable] = None) -> None:
     """Initialisiert das Restic-Repo wenn es noch nicht existiert."""
@@ -277,6 +325,15 @@ def init_repo_if_needed(repo_url: str, env: dict, password: str,
     )
     if result.returncode == 0:
         _log("Repo vorhanden, verwende vorhandenes Repo (inkrementell)")
+        return
+    stderr = result.stderr.decode(errors="replace") if isinstance(result.stderr, bytes) else str(result.stderr or "")
+    if result.returncode == _RESTIC_EXIT_WRONG_PASSWORD or "wrong password" in stderr:
+        # The repo exists but was created with another password - typically
+        # the auto-generated one, before DBM_ENCRYPTION_KEY was set. Running
+        # "init" would only fail with "config file already exists" (and the
+        # backup silently fell back to an unencrypted tar stream). Instead
+        # add the current password as an extra key, using the old one.
+        _add_current_password_as_key(repo_url, env, password, _log)
         return
     _log("Repo nicht gefunden, lege neues Repo an …")
     result = subprocess.run(

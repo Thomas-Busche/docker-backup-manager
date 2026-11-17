@@ -11,7 +11,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app import backup_engine, event_log, job_tracker, netpulse, restic_engine, storage_sync
+from app import backup_engine, encryption, event_log, job_tracker, netpulse, restic_engine, storage_sync
 from app.auth import get_current_user
 from app.config import BACKUPS_DIR
 from app.database import SessionLocal, get_db
@@ -84,11 +84,23 @@ def _read_member_jsons(landscape_dir: Path) -> list[dict]:
     result = []
     if not landscape_dir.exists():
         return result
-    for jf in sorted(landscape_dir.glob("*.json")):
-        if jf.name == "meta.json":
+    files = sorted(landscape_dir.glob("*.json"))
+    # Encrypted landscape backups store the member files as *.json.enc - without
+    # reading them a landscape restored from a storage target showed no members.
+    if encryption.is_enabled():
+        files += sorted(landscape_dir.glob("*.json.enc"))
+    for jf in files:
+        if jf.name in ("meta.json", "meta.json.enc"):
             continue
         try:
-            d = json.loads(jf.read_text())
+            if jf.suffix == ".enc":
+                import tempfile
+                with tempfile.TemporaryDirectory() as tmp:
+                    plain = Path(tmp) / "member.json"
+                    encryption.decrypt_file(jf, plain)
+                    d = json.loads(plain.read_text())
+            else:
+                d = json.loads(jf.read_text())
             if d.get("backup_path"):
                 result.append(d)
         except Exception:
@@ -475,24 +487,29 @@ def _run_landscape_job(job_id: str, label: Optional[str], project_filter: Option
         # data (image, volumes) - without its own record it'd be invisible in
         # the UI, never deletable, and never subject to retention, even
         # though it still takes up real disk space.
+        member_records = []
         for member in result.member_results:
-            db.add(BackupRecord(
+            member_record = BackupRecord(
                 backup_type="container", name=member.name, path=str(member.path),
                 status="ok" if member.ok else "failed", error=member.error,
                 size_bytes=member.size_bytes, containers_json=json.dumps([member.name]),
                 streamed_target_id=member.streamed_target_id,
-            ))
+            )
+            db.add(member_record)
+            member_records.append(member_record)
         db.commit()
 
         if result.ok:
             def upload_progress(label_, idx, total):
                 job_tracker.update_progress(job_id, 1, label_, 1)
 
-            if storage_target_ids is None:
-                sync_results = storage_sync.sync_to_all_targets(result.path, on_progress=upload_progress)
-            else:
-                sync_results = storage_sync.sync_to_selected_targets(result.path, storage_target_ids, on_progress=upload_progress)
+            ok_members = [m for m in member_records if m.status == "ok" and Path(m.path).exists()]
+            sync_results, member_synced = storage_sync.sync_backup_with_members(
+                result.path, [m.path for m in ok_members], storage_target_ids,
+                stream_target=stream_target, on_progress=upload_progress)
             record.synced_target_ids = json.dumps([r["target_id"] for r in sync_results if r["ok"]])
+            for m in ok_members:
+                m.synced_target_ids = json.dumps(member_synced.get(m.path, []))
             db.commit()
 
         if result.cancelled:

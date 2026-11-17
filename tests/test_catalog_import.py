@@ -67,3 +67,49 @@ def test_import_catalog_unknown_target_404():
         client.post("/api/auth/login", json={"username": "catalog-import-user-2", "password": "supersecret1"})
         resp = client.post("/api/settings/storage-targets/999999/import-catalog")
         assert resp.status_code == 404
+
+
+def test_import_prefers_the_target_that_holds_the_data_whatever_the_order(tmp_path):
+    # A streamed backup: the streaming target ("cloud") has image + data, the
+    # other selected target ("nas") only a metadata copy. Importing nas first
+    # used to bind the record to nas for good, and the restore then failed.
+    from app.database import SessionLocal
+    from app.main import app
+    from app.models import BackupRecord, StorageTarget
+    from app.reset_password import reset_password
+
+    reset_password("catalog-order-user", "supersecret1")
+    rel = ("streamy", "20260103T030000Z")
+    nas_root, cloud_root = tmp_path / "nas", tmp_path / "cloud"
+    for root, with_data in ((nas_root, False), (cloud_root, True)):
+        d = root.joinpath(*rel)
+        d.mkdir(parents=True)
+        (d / "meta.json").write_text("{}")
+        if with_data:
+            (d / "image.tar").write_bytes(b"x" * 5000)
+
+    db = SessionLocal()
+    try:
+        ids = []
+        for name, root in (("nas-o", nas_root), ("cloud-o", cloud_root)):
+            t = StorageTarget(name=name, type="local_path", config_json=json.dumps({"path": str(root)}), enabled=True)
+            db.add(t)
+            db.commit()
+            ids.append(t.id)
+    finally:
+        db.close()
+    nas_id, cloud_id = ids
+
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "catalog-order-user", "password": "supersecret1"})
+        assert client.post(f"/api/settings/storage-targets/{nas_id}/import-catalog").json()["imported"] == 1
+        assert client.post(f"/api/settings/storage-targets/{cloud_id}/import-catalog").json()["updated"] == 1
+        # And importing the small copy again doesn't flip it back.
+        assert client.post(f"/api/settings/storage-targets/{nas_id}/import-catalog").json()["skipped"] == 1
+
+    db = SessionLocal()
+    try:
+        rec = db.query(BackupRecord).filter(BackupRecord.name == "streamy").one()
+        assert rec.streamed_target_id == cloud_id
+    finally:
+        db.close()
