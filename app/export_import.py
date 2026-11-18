@@ -305,12 +305,48 @@ def _check_key(key: str) -> str:
     return key
 
 
-def import_export(export_file: Path, db, on_log: Log = None) -> list:
+class ImportCancelled(Exception):
+    pass
+
+
+class _ProgressReader:
+    """Wraps the export file for tarfile and reports every byte read, so the
+    progress bar moves smoothly even through a single multi-GB image.tar.
+    tarfile only reads headers while listing members and skips the data with
+    seek(), so the read bytes add up to roughly the file size."""
+
+    def __init__(self, f, on_bytes: Optional[Callable[[int], None]], should_cancel: Optional[Callable[[], bool]]):
+        self._f = f
+        self._on_bytes = on_bytes
+        self._should_cancel = should_cancel
+
+    def read(self, size=-1):
+        if self._should_cancel and self._should_cancel():
+            raise ImportCancelled("Vom Nutzer abgebrochen")
+        data = self._f.read(size)
+        if data and self._on_bytes:
+            self._on_bytes(len(data))
+        return data
+
+    def __getattr__(self, name):
+        return getattr(self._f, name)
+
+
+def import_export(export_file: Path, db, on_log: Log = None,
+                  on_step: Optional[Callable[[int, str, int], None]] = None,
+                  on_bytes: Optional[Callable[[int], None]] = None,
+                  should_cancel: Optional[Callable[[], bool]] = None) -> list:
     """Extracts an export into BACKUPS_DIR and creates the catalog records.
-    Returns the created BackupRecords (group record last)."""
+    Returns the created BackupRecords (group record last).
+
+    Progress: on_step(1, "Entpacken", file_size) starts the extraction (then
+    on_bytes(n) for every n bytes read from the file), on_step(2, ..., 0)
+    starts taking the folders over into the catalog. should_cancel() is
+    polled while extracting; raising ImportCancelled leaves nothing behind."""
     from app.backup_engine import dir_size_bytes
     from app.models import BackupRecord
     _log = on_log or (lambda m: None)
+    _step = on_step or (lambda *a: None)
     manifest = read_manifest(export_file)
     keys = [_check_key(m["key"]) for m in manifest.get("members", [])]
     lkey = _check_key(manifest["landscape"]["key"]) if manifest.get("landscape") else None
@@ -318,12 +354,15 @@ def import_export(export_file: Path, db, on_log: Log = None) -> list:
     for k in roots:
         if (BACKUPS_DIR / k).exists():
             raise RuntimeError(f"Diese Sicherung ist hier schon vorhanden: {k}")
-    with _staging() as tmp, tarfile.open(export_file, "r") as tar:
+    _step(1, "Entpacken", export_file.stat().st_size)
+    with _staging() as tmp, open(export_file, "rb") as raw, \
+            tarfile.open(fileobj=_ProgressReader(raw, on_bytes, should_cancel), mode="r") as tar:
         kwargs = {"filter": "data"} if hasattr(tarfile, "data_filter") else {}
         tar.extractall(tmp, members=_safe_members(tar, roots), **kwargs)
         for k in roots:
             if not (Path(tmp) / k).is_dir():
                 raise RuntimeError(f"Exportdatei unvollständig: {k} fehlt")
+        _step(2, "In den Katalog übernehmen", 0)
         for k in roots:
             dest = BACKUPS_DIR / k
             dest.parent.mkdir(parents=True, exist_ok=True)

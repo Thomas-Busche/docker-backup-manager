@@ -69,3 +69,48 @@ def test_import_rejects_path_traversal_and_foreign_files(tmp_path):
         tar.add(__file__, arcname="readme.txt")
     with pytest.raises(RuntimeError, match="Keine Exportdatei"):
         export_import.read_manifest(other)
+
+
+def test_import_reports_progress_and_can_be_cancelled(tmp_path):
+    import shutil
+    from app import export_import
+    from app.config import BACKUPS_DIR
+    from app.database import SessionLocal, init_db
+    init_db()
+    name = f"prog-{uuid.uuid4().hex[:6]}"
+    src = _fake_full(name)
+    out = tmp_path / "p.tar"
+    export_import.build_export([{"record_path": str(src)}], out)
+    shutil.rmtree(src.parent)
+    size = out.stat().st_size
+
+    # Cancelled while extracting: nothing lands in BACKUPS_DIR, no records.
+    with SessionLocal() as db, pytest.raises(export_import.ImportCancelled):
+        export_import.import_export(out, db, should_cancel=lambda: True)
+    assert not (BACKUPS_DIR / name).exists()
+    assert not list((BACKUPS_DIR / ".tmp").glob("dbm-export-*"))
+
+    steps, read = [], []
+    with SessionLocal() as db:
+        export_import.import_export(out, db, on_step=lambda n, s, t: steps.append((n, t)),
+                                    on_bytes=read.append)
+    assert steps == [(1, size), (2, 0)]
+    # every byte of the file is read once (headers a second time while listing)
+    assert size * 0.9 <= sum(read) <= size * 1.2
+
+
+def test_job_progress_by_bytes():
+    from app import job_tracker
+    job = job_tracker.create_job("import", "Import x", total_steps=3)
+    job_tracker.update_progress(job.id, 2, "Entpacken")
+    job_tracker.set_byte_total(job.id, 1000)
+    job_tracker.update_bytes(job.id, 250)
+    d = job.to_dict()
+    assert d["percent"] == 25 and d["bytes_total"] == 1000 and d["current_step"] == 2
+    import time
+    time.sleep(0.3)
+    job_tracker.update_bytes(job.id, 250)
+    d = job.to_dict()
+    assert d["percent"] == 50 and d["speed_bytes_per_sec"] and d["eta_seconds"] is not None
+    job_tracker.set_byte_total(job.id, 0)
+    assert job.to_dict()["bytes_total"] == 0 and job.bytes_done == 0

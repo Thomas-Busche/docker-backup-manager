@@ -144,23 +144,45 @@ function _jobStatusBadge(status) {
   return { cls: "failed", label: "fehlgeschlagen" };
 }
 
+const JOB_ICONS = { backup: "💾", import: "⬆", export: "⬇" };
+
+// "Schritt 2/3" - plus the percentage when the step has a known byte size
+// (kept short: on phones this is the only line of a collapsed card).
+function jobStepText(job) {
+  const running = job.status === "running" || job.status === "cancelling";
+  let text = `Schritt ${job.current_step}/${job.total_steps}`;
+  if (job.bytes_total > 0 && running) {
+    text += ` · ${job.percent} %`;
+    if (job.eta_seconds != null) text += ` · noch ${fmtDuration(job.eta_seconds)}`;
+  }
+  return text;
+}
+
+function jobMetaText(job) {
+  if (job.status !== "running" && job.status !== "cancelling") return fmtDuration(job.elapsed_seconds);
+  if (job.bytes_total > 0) {
+    return `${fmtBytes(Math.min(job.bytes_done, job.bytes_total))} von ${fmtBytes(job.bytes_total)}`
+      + (fmtSpeed(job.speed_bytes_per_sec) ? " · " + fmtSpeed(job.speed_bytes_per_sec) : "")
+      + " · Verstrichen: " + fmtDuration(job.elapsed_seconds);
+  }
+  return "Verstrichen: " + fmtDuration(job.elapsed_seconds)
+    + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
+    + (fmtSpeed(job.speed_bytes_per_sec) ? " · Leserate: " + fmtSpeed(job.speed_bytes_per_sec) : "")
+    + (fmtSpeed(job.upload_speed_bytes_per_sec) ? " · Upload: " + fmtSpeed(job.upload_speed_bytes_per_sec) : "");
+}
+
 function renderJobCard(job) {
   const { cls, label } = _jobStatusBadge(job.status);
   const card = h(`
     <div class="card job-card" data-job-id="${job.id}">
-      <div class="job-title"><span>${job.kind === "backup" ? "💾" : "♻️"} ${job.label}</span>
+      <div class="job-title"><span>${JOB_ICONS[job.kind] || "♻️"} ${escHtml(job.label)}</span>
         <span class="badge ${cls}">${label}</span></div>
       <div class="muted job-step" style="font-size:.8rem">${job.step_name}</div>
       <div class="progress-wrap">
         <div class="progress-bar"><div style="width:${job.percent}%"></div></div>
         <div class="progress-meta">
-          <span class="job-step-count">Schritt ${job.current_step}/${job.total_steps}</span>
-          <span class="job-elapsed">${job.status === "running"
-            ? "Verstrichen: " + fmtDuration(job.elapsed_seconds)
-              + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
-              + (fmtSpeed(job.speed_bytes_per_sec) ? " · Leserate: " + fmtSpeed(job.speed_bytes_per_sec) : "")
-              + (fmtSpeed(job.upload_speed_bytes_per_sec) ? " · Upload: " + fmtSpeed(job.upload_speed_bytes_per_sec) : "")
-            : fmtDuration(job.elapsed_seconds)}</span>
+          <span class="job-step-count">${escHtml(jobStepText(job))}</span>
+          <span class="job-elapsed">${escHtml(jobMetaText(job))}</span>
         </div>
       </div>
       ${job.error ? `<div class="error-msg">${job.error}</div>` : ""}
@@ -237,13 +259,8 @@ function updateJobCard(card, job) {
   badge.textContent = label;
   card.querySelector(".job-step").textContent = job.step_name;
   card.querySelector(".progress-bar > div").style.width = `${job.percent}%`;
-  card.querySelector(".job-step-count").textContent = `Schritt ${job.current_step}/${job.total_steps}`;
-  card.querySelector(".job-elapsed").textContent = job.status === "running"
-    ? "Verstrichen: " + fmtDuration(job.elapsed_seconds)
-      + (job.eta_seconds != null ? " · ETA " + fmtDuration(job.eta_seconds) : "")
-      + (fmtSpeed(job.speed_bytes_per_sec) ? " · Leserate: " + fmtSpeed(job.speed_bytes_per_sec) : "")
-      + (fmtSpeed(job.upload_speed_bytes_per_sec) ? " · Upload: " + fmtSpeed(job.upload_speed_bytes_per_sec) : "")
-    : fmtDuration(job.elapsed_seconds);
+  card.querySelector(".job-step-count").textContent = jobStepText(job);
+  card.querySelector(".job-elapsed").textContent = jobMetaText(job);
   const existingError = card.querySelector(".error-msg");
   if (job.error && !existingError) {
     card.appendChild(h(`<div class="error-msg">${job.error}</div>`));
@@ -264,7 +281,7 @@ function updateJobCard(card, job) {
 
 function _syncJobCardsInContainer(container, jobs, emptyMessage) {
   if (!jobs.length) {
-    container.querySelectorAll(".job-card").forEach(c => c.remove());
+    container.querySelectorAll(".job-card:not(.local-job)").forEach(c => c.remove());
     if (emptyMessage && !container.querySelector(".empty-state")) {
       container.innerHTML = `<div class="empty-state">${emptyMessage}</div>`;
     }
@@ -273,7 +290,7 @@ function _syncJobCardsInContainer(container, jobs, emptyMessage) {
   const emptyState = container.querySelector(".empty-state");
   if (emptyState) emptyState.remove();
   const visibleIds = new Set(jobs.map((j) => String(j.id)));
-  container.querySelectorAll(".job-card").forEach((card) => {
+  container.querySelectorAll(".job-card:not(.local-job)").forEach((card) => {
     if (!visibleIds.has(card.dataset.jobId)) card.remove();
   });
   jobs.forEach((job) => {
@@ -1086,18 +1103,84 @@ async function startExport(v) {
   } catch (err) { toast(err.message, "error"); }
 }
 
-async function importBackupFile(file) {
-  toast(`Lade ${file.name} hoch (${fmtBytes(file.size)}) …`);
-  try {
-    const res = await fetch(`/api/backups/import`, {
-      method: "POST", body: file, credentials: "same-origin",
-      headers: { "Content-Type": "application/octet-stream" },
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error((data && data.detail) || `Import fehlgeschlagen (${res.status})`);
-    toast("Datei hochgeladen - Import läuft");
+// Upload with a progress card in the job tray (step 1 of 3). Uses XHR because
+// fetch() cannot report upload progress. Once the server has the file, the
+// server-side job (Entpacken, In den Katalog übernehmen) takes over the tray.
+function importBackupFile(file) {
+  const tray = ensureJobTray();
+  const card = h(`
+    <div class="card job-card local-job expanded">
+      <div class="job-title"><span>⬆ Import ${escHtml(file.name)}</span><span class="badge running">läuft</span></div>
+      <div class="muted job-step" style="font-size:.8rem">Hochladen</div>
+      <div class="progress-wrap">
+        <div class="progress-bar"><div style="width:0%"></div></div>
+        <div class="progress-meta">
+          <span class="job-step-count">Schritt 1/3 · 0 %</span>
+          <span class="job-elapsed">0 B von ${escHtml(fmtBytes(file.size))}</span>
+        </div>
+      </div>
+      <div class="row-actions" style="margin-top:8px;"><button type="button" class="btn danger job-cancel-btn" style="padding:4px 10px; font-size:.8rem;">Abbrechen</button></div>
+    </div>`);
+  card.querySelector(".job-title").addEventListener("click", () => card.classList.toggle("expanded"));
+  tray.prepend(card);
+  const bar = card.querySelector(".progress-bar > div");
+  const stepEl = card.querySelector(".job-step");
+  const countEl = card.querySelector(".job-step-count");
+  const metaEl = card.querySelector(".job-elapsed");
+
+  const started = Date.now();
+  const samples = []; // [ms, bytes] of the last ~5 s for a steady rate
+  let finished = false;
+  const warnLeave = (e) => { e.preventDefault(); e.returnValue = ""; };
+  window.addEventListener("beforeunload", warnLeave);
+  const done = (message, type) => {
+    finished = true;
+    window.removeEventListener("beforeunload", warnLeave);
+    card.remove();
+    if (message) toast(message, type);
+  };
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/backups/import");
+  xhr.setRequestHeader("Content-Type", "application/octet-stream");
+  xhr.setRequestHeader("X-File-Name", encodeURIComponent(file.name));
+  xhr.upload.onprogress = (e) => {
+    if (finished) return;
+    const total = e.lengthComputable ? e.total : file.size;
+    const now = Date.now();
+    samples.push([now, e.loaded]);
+    while (samples.length > 2 && now - samples[0][0] > 5000) samples.shift();
+    const [t0, b0] = samples[0];
+    const rate = now - t0 > 500 ? (e.loaded - b0) / ((now - t0) / 1000) : null;
+    const pct = total ? Math.min(100, Math.floor(e.loaded * 100 / total)) : 0;
+    bar.style.width = `${pct}%`;
+    const eta = rate ? (total - e.loaded) / rate : null;
+    countEl.textContent = `Schritt 1/3 · ${pct} %` + (eta != null && pct < 100 ? ` · noch ${fmtDuration(eta)}` : "");
+    metaEl.textContent = `${fmtBytes(e.loaded)} von ${fmtBytes(total)}`
+      + (rate ? ` · ${fmtSpeed(rate)}` : "") + ` · Verstrichen: ${fmtDuration((now - started) / 1000)}`;
+  };
+  xhr.upload.onload = () => {
+    if (finished) return;
+    bar.style.width = "100%";
+    stepEl.textContent = "Server prüft die Datei …";
+    countEl.textContent = "Schritt 1/3 · 100 %";
+    card.querySelector(".row-actions")?.remove();
+  };
+  xhr.onload = () => {
+    let data = {};
+    try { data = JSON.parse(xhr.responseText); } catch (e) { /* not JSON */ }
+    if (xhr.status === 401) { done(); render(loginScreen()); return; }
+    if (xhr.status < 200 || xhr.status >= 300) {
+      done((data && data.detail) || `Import fehlgeschlagen (${xhr.status})`, "error");
+      return;
+    }
+    done();
     pollGlobalJobs();
-  } catch (err) { toast(err.message, "error"); }
+  };
+  xhr.onerror = () => done("Upload abgebrochen - Verbindung zum Server verloren", "error");
+  xhr.onabort = () => done("Upload abgebrochen", "ok");
+  card.querySelector(".job-cancel-btn").addEventListener("click", () => xhr.abort());
+  xhr.send(file);
 }
 
 function describeRetention(s) {
