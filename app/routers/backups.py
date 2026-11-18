@@ -1059,12 +1059,25 @@ def download_export(job_id: str, user: User = Depends(get_current_user)):
 def _run_import_job(job_id: str, upload: Path):
     from app import export_import
     db = SessionLocal()
+    # Step 1 ("Hochladen") already happened in the browser.
+    phases = {1: "Entpacken", 2: "In den Katalog übernehmen"}
+
+    def on_step(n: int, name: str, total_bytes: int):
+        job_tracker.update_progress(job_id, n + 1, phases.get(n, name))
+        job_tracker.set_byte_total(job_id, total_bytes)
+
     try:
-        job_tracker.update_progress(job_id, 1, "Importiere Sicherung", 2)
-        created = export_import.import_export(upload, db, on_log=lambda m: job_tracker.add_log(job_id, m))
+        created = export_import.import_export(
+            upload, db, on_log=lambda m: job_tracker.add_log(job_id, m), on_step=on_step,
+            on_bytes=lambda n: job_tracker.update_bytes(job_id, n),
+            should_cancel=lambda: job_tracker.is_cancel_requested(job_id))
         main = created[-1]
         job_tracker.finish_job(job_id, True, result_backup_id=main.id)
         event_log.log_event("backup", f"Sicherung {main.name} importiert ({len(created)} Einträge)")
+    except export_import.ImportCancelled:
+        db.rollback()
+        job_tracker.cancel_job(job_id)
+        event_log.log_event("backup", "Import abgebrochen")
     except Exception as exc:  # noqa: BLE001
         db.rollback()
         job_tracker.finish_job(job_id, False, str(exc))
@@ -1096,6 +1109,9 @@ async def import_backup(request: Request, user: User = Depends(get_current_user)
     except BaseException:
         upload.unlink(missing_ok=True)
         raise
-    job = job_tracker.create_job("import", "Import einer Sicherung", total_steps=2)
+    from urllib.parse import unquote
+    name = unquote(request.headers.get("x-file-name", ""))[:120].strip()
+    job = job_tracker.create_job("import", f"Import {name}" if name else "Import einer Sicherung", total_steps=3)
+    job_tracker.update_progress(job.id, 2, "Entpacken")
     threading.Thread(target=_run_import_job, args=(job.id, upload), daemon=True).start()
     return {"job_id": job.id}

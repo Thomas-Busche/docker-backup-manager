@@ -41,6 +41,9 @@ class Job:
     cancel_requested: bool = False
     bytes_done: int = 0
     upload_bytes_done: int = 0
+    # When set (> 0), the current step has a known byte size: percent and
+    # remaining time come from bytes_done / bytes_total instead of the steps.
+    bytes_total: int = 0
 
     def to_dict(self):
         elapsed = (self.finished_at or time.time()) - self.started_at
@@ -63,6 +66,12 @@ class Job:
 
         speed_bytes_per_sec = _speed(_byte_samples) if self.status == "running" else None
         upload_speed_bytes_per_sec = _speed(_upload_byte_samples) if self.status == "running" else None
+        if self.bytes_total > 0 and self.status in ("running", "cancelling"):
+            done = min(self.bytes_done, self.bytes_total)
+            pct = int(done * 100 / self.bytes_total)
+            eta_seconds = None
+            if speed_bytes_per_sec:
+                eta_seconds = round((self.bytes_total - done) / speed_bytes_per_sec, 1)
 
         return {
             "id": self.id,
@@ -80,6 +89,7 @@ class Job:
             "download_url": self.download_url,
             "cancellable": self.status == "running" and not self.cancel_requested,
             "bytes_done": self.bytes_done,
+            "bytes_total": self.bytes_total,
             "speed_bytes_per_sec": speed_bytes_per_sec,
             "upload_speed_bytes_per_sec": upload_speed_bytes_per_sec,
         }
@@ -101,6 +111,19 @@ def update_progress(job_id: str, current_step: int, step_name: str, total_steps:
         job.step_name = step_name
         if total_steps is not None:
             job.total_steps = max(total_steps, 1)
+
+
+def set_byte_total(job_id: str, total: int) -> None:
+    """Starts a step with a known size: resets the byte counter so percent,
+    rate and remaining time describe just this step. 0 switches back to
+    step-based progress."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return
+        job.bytes_total = max(int(total), 0)
+        job.bytes_done = 0
+        _byte_samples.pop(job_id, None)
 
 
 def _record_sample(samples_dict: dict, job_id: str, cumulative: int) -> None:
