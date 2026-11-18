@@ -78,12 +78,20 @@ def test_leftover_lock_of_a_previous_repo_is_removed(tmp_path):
     p = subprocess.Popen(["restic", "-r", str(repo), "backup", "--stdin"], stdin=subprocess.PIPE,
                          env={**os.environ, "RESTIC_PASSWORD": "pw"},
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    for _ in range(50):
-        if any((repo / "locks").iterdir()):
+    # Wait for a completely written lock: restic creates the file first and
+    # fills it afterwards, so killing it right after the file shows up can
+    # leave an empty lock that later runs ignore (flaky on slow CI runners).
+    lock = None
+    for _ in range(300):
+        files = [f for f in (repo / "locks").iterdir() if f.stat().st_size > 0]
+        if files:
+            lock = files[0]
             break
-        time.sleep(0.1)
+        time.sleep(0.05)
+    time.sleep(0.3)
     p.kill()
     p.wait()
+    assert lock is not None, "restic hat keine Sperrdatei angelegt"
     shutil.copytree(repo / "locks", old_locks)
     shutil.rmtree(repo)
     restic_engine.init_repo_if_needed(str(repo), {}, "pw")  # fresh repo, new master key
